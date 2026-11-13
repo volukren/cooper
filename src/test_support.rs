@@ -20,7 +20,7 @@ const REAL_STEP: Duration = Duration::from_millis(5);
 const SETTLE_FRAMES: usize = 30;
 pub const WINDOW_SIZE: (f32, f32) = crate::WINDOW_SIZE;
 
-pub const SAMPLE_DBS: [&str; 5] = ["shop", "library", "analytics", "types", "empty"];
+pub const SAMPLE_DBS: [&str; 3] = ["shop", "library", "analytics"];
 
 pub type Rt = Runtime<Workspace>;
 
@@ -46,14 +46,12 @@ impl TestConfig {
     }
 
     pub fn add_sample_db(&self, name: &str) -> PathBuf {
-        let source = sample_db(name);
         let data = self.dir.path().join("data");
         std::fs::create_dir_all(&data).expect("create temp data dir");
-        let copy = data.join(format!("{name}.db"));
-        std::fs::copy(&source, &copy)
-            .unwrap_or_else(|err| panic!("copy {} to {}: {err}", source.display(), copy.display()));
-        self.add_connection(sqlite_connection(name, &copy));
-        copy
+        let path = data.join(format!("{name}.db"));
+        build_sample_db(name, &path);
+        self.add_connection(sqlite_connection(name, &path));
+        path
     }
 
     pub fn add_connection(&self, connection: Connection) {
@@ -84,10 +82,20 @@ impl TestConfig {
     }
 }
 
-pub fn sample_db(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("data")
-        .join(format!("{name}.db"))
+pub fn sample_sql(name: &str) -> &'static str {
+    match name {
+        "shop" => include_str!("test_support/fixtures/shop.sql"),
+        "library" => include_str!("test_support/fixtures/library.sql"),
+        "analytics" => include_str!("test_support/fixtures/analytics.sql"),
+        other => panic!("no SQL fixture for the sample database {other:?}"),
+    }
+}
+
+pub fn build_sample_db(name: &str, path: &Path) {
+    let db = rusqlite::Connection::open(path)
+        .unwrap_or_else(|err| panic!("create {}: {err}", path.display()));
+    db.execute_batch(sample_sql(name))
+        .unwrap_or_else(|err| panic!("run the {name} fixture: {err}"));
 }
 
 pub fn sqlite_connection(name: &str, path: &Path) -> Connection {

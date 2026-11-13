@@ -1,7 +1,6 @@
 use super::{ConsoleArea, GRID, RESULT, SQL, grid, syntax};
 use crate::browser::{Main, Pane};
 use crate::keys::Command;
-use crate::queries::{QueryStore, SavedQuery};
 use crate::test_support::{TestConfig, TestWorkspace};
 
 const ENDLESS: &str =
@@ -15,33 +14,8 @@ fn hint(ws: &TestWorkspace) -> Option<String> {
     status(ws).map(|(text, _)| text)
 }
 
-fn names(ws: &TestWorkspace) -> Vec<String> {
-    ws.browser().saved.names()
-}
-
-fn selected(ws: &TestWorkspace) -> Option<String> {
-    ws.browser().saved.selected_name()
-}
-
-fn list_state(ws: &TestWorkspace) -> (Option<String>, String, bool) {
-    let saved = &ws.browser().saved;
-    (
-        saved.count_label(),
-        saved.filter.text.clone(),
-        saved.failed(),
-    )
-}
-
-fn bound(ws: &TestWorkspace) -> Option<(String, bool)> {
-    ws.console().bound()
-}
-
 fn text(ws: &TestWorkspace) -> String {
     ws.console().text().to_string()
-}
-
-fn title(ws: &TestWorkspace) -> String {
-    ws.console().title_text()
 }
 
 fn outcome(ws: &TestWorkspace) -> Option<String> {
@@ -68,23 +42,15 @@ fn running_status(ws: &TestWorkspace) -> Option<String> {
     ws.console().running_status()
 }
 
-fn save_note(ws: &TestWorkspace) -> (Option<String>, bool) {
-    let prompt = &ws.console().prompt;
-    (
-        prompt.note.as_ref().map(super::SaveNote::text),
-        prompt.overwrite,
-    )
-}
-
-fn name_input(ws: &TestWorkspace) -> String {
-    ws.console().name.text.clone()
-}
-
 fn set_sql(ws: &mut TestWorkspace, sql: &str) {
     let sql = sql.to_string();
     ws.update(move |s, _| {
         if let Some(b) = s.active_browser_mut() {
-            b.console.set_text(&sql);
+            let sql_edit = &mut b.console.sql;
+            let focused = sql_edit.focused;
+            sql_edit.replace_text(&sql);
+            sql_edit.set_caret(sql_edit.text.len());
+            sql_edit.focused = focused;
         }
     });
 }
@@ -101,46 +67,12 @@ fn grid_focused(ws: &TestWorkspace) -> bool {
     ws.is_focused(GRID)
 }
 
-fn saved_focused(ws: &TestWorkspace) -> bool {
-    ws.focus_within(crate::browser::saved::PANE)
-}
-
 fn focused_pane(ws: &TestWorkspace) -> Option<Pane> {
     ws.browser().focused_pane(ws.focused().as_deref())
 }
 
 fn tree_focused(ws: &TestWorkspace) -> bool {
     focused_pane(ws) == Some(Pane::Tree)
-}
-
-fn click_in_dialog(ws: &mut TestWorkspace, label: &str) {
-    let dialog = ws
-        .elements()
-        .into_iter()
-        .find(|e| e.role == "dialog")
-        .and_then(|e| e.key)
-        .expect("an open dialog");
-    ws.click_in(&dialog, label);
-}
-
-fn wait_dialog_closed(ws: &mut TestWorkspace) {
-    ws.wait_until("the dialog to close", |ws| {
-        !ws.has_dialog() && ws.state().dialog.is_none()
-    });
-    for _ in 0..6 {
-        ws.step();
-    }
-}
-
-fn queries(config: &TestConfig) -> QueryStore {
-    config.store().queries()
-}
-
-fn query(name: &str, sql: &str) -> SavedQuery {
-    SavedQuery {
-        name: name.to_string(),
-        sql: sql.to_string(),
-    }
 }
 
 fn press_now(ws: &mut TestWorkspace, keys: &str) {
@@ -174,11 +106,9 @@ fn console_opens_empty_and_runs_with_every_run_key() {
     assert_eq!(ws.browser().main, Main::Console);
     assert!(editor_focused(&ws), "⌘E focuses the editor");
     assert_eq!(outcome(&ws), None, "nothing has been run yet");
-    assert_eq!(title(&ws), "· new");
 
     ws.type_text("select 1 as q, 2 as rs");
     assert_eq!(text(&ws), "select 1 as q, 2 as rs");
-    assert_eq!(title(&ws), "· new*");
 
     for keys in ["cmd-enter", "f5"] {
         press_now(&mut ws, keys);
@@ -212,7 +142,6 @@ fn console_opens_empty_and_runs_with_every_run_key() {
     assert_eq!(text(&ws), "select 1 as a\nselect 2 as b, 3 as c");
 
     ws.replace_text("  ");
-    assert_eq!(title(&ws), "· new");
     ws.press("cmd-enter");
     assert_eq!(
         hint(&ws).as_deref(),
@@ -497,398 +426,7 @@ fn result_columns_fit_their_content() {
 }
 
 #[test]
-fn saving_names_binds_and_selects_the_query() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let mut ws = shop_console(&config);
-
-    ws.press("cmd-s");
-    assert_eq!(
-        hint(&ws).as_deref(),
-        Some("Nothing to save: the editor is empty")
-    );
-    assert!(!ws.has_dialog());
-
-    ws.type_text("select 1;");
-    ws.press("enter");
-    assert_eq!(text(&ws), "select 1;\n");
-    ws.press("cmd-s");
-    assert!(ws.has_dialog(), "an unbound script asks for a name");
-
-    ws.press("enter");
-    assert!(ws.has_dialog());
-    assert_eq!(
-        save_note(&ws),
-        (Some("A query name is required".to_string()), false)
-    );
-    ws.type_text("first");
-    assert_eq!(save_note(&ws), (None, false));
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-
-    assert_eq!(hint(&ws).as_deref(), Some("Query \"first\" saved"));
-    assert_eq!(title(&ws), "· first");
-    assert_eq!(
-        queries(&config).load("shop").unwrap(),
-        [query("first", "select 1;")],
-        "stored trimmed"
-    );
-    assert_eq!(names(&ws), ["first"]);
-    assert_eq!(selected(&ws).as_deref(), Some("first"));
-    assert_eq!(bound(&ws), Some(("first".to_string(), false)));
-    assert_eq!(list_state(&ws).0.as_deref(), Some("1"));
-    ws.wait_until("the focus to return to the editor", editor_focused);
-
-    ws.type_text("select 2;");
-    assert_eq!(title(&ws), "· first*");
-    assert_eq!(bound(&ws), Some(("first".to_string(), true)));
-    ws.press("cmd-s");
-    assert!(!ws.has_dialog());
-    assert_eq!(title(&ws), "· first");
-    assert_eq!(
-        queries(&config).load("shop").unwrap(),
-        [query("first", "select 1;\nselect 2;")]
-    );
-
-    ws.press("cmd-shift-s");
-    assert!(ws.has_dialog());
-    assert_eq!(name_input(&ws), "first");
-    ws.type_text("second");
-    assert_eq!(name_input(&ws), "second", "the name is selected");
-    click_in_dialog(&mut ws, "Save");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(title(&ws), "· second");
-    assert_eq!(names(&ws), ["first", "second"]);
-    assert_eq!(selected(&ws).as_deref(), Some("second"));
-
-    ws.press("cmd-shift-n");
-    ws.type_text("select 3");
-    ws.press("cmd-s");
-    ws.type_text("first");
-    ws.press("enter");
-    assert_eq!(
-        save_note(&ws),
-        (
-            Some("\"first\" already exists · Enter overwrites it".to_string()),
-            true
-        )
-    );
-    assert!(ws.has_dialog());
-    ws.type_text("x");
-    assert_eq!(save_note(&ws), (None, false));
-    ws.press("backspace enter");
-    assert!(save_note(&ws).1, "the second Enter overwrites");
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(title(&ws), "· first");
-    assert_eq!(
-        queries(&config).load("shop").unwrap(),
-        [
-            query("first", "select 3"),
-            query("second", "select 1;\nselect 2;")
-        ]
-    );
-    assert_eq!(
-        selected(&ws).as_deref(),
-        Some("first"),
-        "the overwritten query is selected"
-    );
-
-    ws.type_text(" -- more");
-    ws.press("cmd-shift-s");
-    assert!(ws.has_dialog());
-    ws.press("escape");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(title(&ws), "· first*");
-}
-
-#[test]
-fn names_are_per_connection() {
-    let config = TestConfig::with_sample_dbs(&["shop", "library"]);
-    queries(&config)
-        .save("library", &query("same", "select 0"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-    assert_eq!(names(&ws), Vec::<String>::new());
-    ws.type_text("select 1");
-    ws.press("cmd-s");
-    ws.type_text("same");
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(title(&ws), "· same");
-    assert_eq!(
-        queries(&config).load("library").unwrap(),
-        [query("same", "select 0")]
-    );
-    assert_eq!(
-        queries(&config).load("shop").unwrap(),
-        [query("same", "select 1")]
-    );
-}
-
-#[test]
-fn saved_list_opens_runs_and_asks_before_replacing() {
-    let config = TestConfig::with_sample_dbs(&["shop", "library"]);
-    let store = queries(&config);
-    store
-        .save("shop", &query("count", "select\tcount(*) from customers"))
-        .unwrap();
-    store
-        .save(
-            "shop",
-            &query("Active", "select * from customers where is_active = 1"),
-        )
-        .unwrap();
-    store.save("library", &query("other", "select 1")).unwrap();
-    let mut ws = shop_console(&config);
-
-    assert_eq!(
-        names(&ws),
-        ["Active", "count"],
-        "sorted, this connection only"
-    );
-    ws.press("cmd-o");
-    assert!(saved_focused(&ws));
-    ws.press("down enter");
-    assert_eq!(
-        text(&ws),
-        "select    count(*) from customers",
-        "tabs become spaces"
-    );
-    assert_eq!(title(&ws), "· count");
-    assert!(editor_focused(&ws));
-    assert_eq!(outcome(&ws), None, "Enter opens without running");
-    assert_eq!(bound(&ws), Some(("count".to_string(), false)));
-
-    ws.type_text(" where id > 2");
-    ws.press("cmd-o");
-    ws.press("up enter");
-    assert!(ws.has_dialog());
-    ws.click_label("Cancel");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "select    count(*) from customers where id > 2");
-    assert_eq!(title(&ws), "· count*");
-
-    ws.press("cmd-o");
-    assert_eq!(selected(&ws).as_deref(), Some("Active"));
-    ws.press("f5");
-    assert!(ws.has_dialog());
-    assert!(!is_running(&ws));
-    ws.click_label("Replace");
-    wait_dialog_closed(&mut ws);
-    assert!(editor_focused(&ws), "the loaded query has the focus");
-    assert_eq!(text(&ws), "select * from customers where is_active = 1");
-    let done = ws.wait_script_done();
-    assert!(done.starts_with("6 rows · "), "{done}");
-    assert_eq!(ws.browser().main, Main::Console);
-
-    ws.press("cmd-o");
-    ws.press("down cmd-enter");
-    assert!(!ws.has_dialog());
-    assert_eq!(title(&ws), "· count");
-    let done = ws.wait_script_done();
-    assert!(done.starts_with("1 row · "), "{done}");
-    let result = ws.console().result().unwrap().clone();
-    assert_eq!(result.rows[0][0].as_deref(), Some("8"));
-
-    set_sql(&mut ws, ENDLESS);
-    ws.press("cmd-enter");
-    ws.press("cmd-o");
-    ws.press("f5");
-    ws.click_label("Replace");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(
-        hint(&ws).as_deref(),
-        Some("A script is already running · Esc cancels it")
-    );
-    ws.press("cmd-.");
-    assert_eq!(ws.wait_script_done(), "cancelled");
-}
-
-#[test]
-fn new_script_asks_only_for_unsaved_text_and_keeps_the_result() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-
-    ws.type_text("select 7");
-    ws.press("cmd-enter");
-    let done = ws.wait_script_done();
-
-    ws.press("cmd-shift-n");
-    assert!(ws.has_dialog(), "unsaved text asks first");
-    ws.click_label("Cancel");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "select 7");
-
-    ws.press("cmd-shift-n");
-    ws.click_label("Discard");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "");
-    assert_eq!(title(&ws), "· new");
-    assert_eq!(outcome(&ws), Some(done), "the last result stays");
-    assert!(editor_focused(&ws));
-
-    ws.press("cmd-o enter");
-    assert_eq!(title(&ws), "· one");
-    ws.press("cmd-shift-n");
-    assert!(!ws.has_dialog());
-    assert_eq!(text(&ws), "");
-    assert_eq!(ws.console().saved_name(), None);
-
-    ws.press("cmd-o enter");
-    assert_eq!(title(&ws), "· one");
-    ws.press("cmd-a backspace");
-    assert_eq!(ws.console().saved_name(), None);
-    ws.type_text("select 2");
-    ws.press("cmd-s");
-    assert!(ws.has_dialog());
-    assert_eq!(name_input(&ws), "");
-    ws.press("escape");
-    wait_dialog_closed(&mut ws);
-}
-
-fn right_click_first_saved_row(ws: &mut TestWorkspace) {
-    ws.right_click("saved-row-0");
-}
-
-fn menu_open(ws: &TestWorkspace) -> bool {
-    ws.has_label("Open and Run")
-}
-
-#[test]
-fn deleting_asks_and_keeps_the_editor_text() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let store = queries(&config);
-    store.save("shop", &query("one", "select 1")).unwrap();
-    store.save("shop", &query("two", "select 2")).unwrap();
-    let mut ws = shop_console(&config);
-
-    ws.press("cmd-o down enter");
-    assert_eq!(title(&ws), "· two");
-
-    ws.press("cmd-o cmd-backspace");
-    assert!(ws.has_dialog());
-    assert!(ws.has_label("Delete"));
-    ws.press("escape");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(names(&ws), ["one", "two"], "Esc cancels only the question");
-
-    ws.press("cmd-o cmd-backspace");
-    ws.click_label("Delete");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(names(&ws), ["one"]);
-    assert_eq!(selected(&ws).as_deref(), Some("one"));
-    assert_eq!(store.load("shop").unwrap(), [query("one", "select 1")]);
-    assert_eq!(text(&ws), "select 2", "the editor keeps its text");
-    assert_eq!(title(&ws), "· new*", "and is no longer bound");
-
-    right_click_first_saved_row(&mut ws);
-    ws.click_label("Delete…");
-    ws.click_label("Delete");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(names(&ws), Vec::<String>::new());
-    assert_eq!(list_state(&ws).0, None, "no count for an empty list");
-    assert!(store.load("shop").unwrap().is_empty());
-}
-
-#[test]
-fn the_list_filters_by_name_then_sql() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let store = queries(&config);
-    store
-        .save(
-            "shop",
-            &query("active users", "select * from users where active"),
-        )
-        .unwrap();
-    store
-        .save("shop", &query("audit", "select * from audit_log -- users"))
-        .unwrap();
-    store
-        .save("shop", &query("orders report", "select * from orders"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-
-    ws.press("cmd-o");
-    ws.type_text("USERS");
-    assert_eq!(names(&ws), ["active users", "audit"]);
-    assert_eq!(
-        list_state(&ws),
-        (Some("2/3".to_string()), "USERS".to_string(), false)
-    );
-    ws.press("down");
-    assert_eq!(selected(&ws).as_deref(), Some("audit"));
-    ws.press("enter");
-    assert_eq!(title(&ws), "· audit");
-    assert_eq!(list_state(&ws).1, "USERS", "the search stays after opening");
-
-    ws.press("cmd-o");
-    ws.type_text("zzz");
-    assert_eq!(names(&ws), Vec::<String>::new());
-    assert_eq!(selected(&ws), None);
-    ws.press("enter f5");
-    assert_eq!(title(&ws), "· audit");
-    assert!(saved_focused(&ws));
-
-    ws.press("escape");
-    assert_eq!(
-        list_state(&ws),
-        (Some("3".to_string()), String::new(), false)
-    );
-    assert_eq!(names(&ws).len(), 3);
-}
-
-#[test]
-fn a_broken_queries_file_is_reported_and_reloads() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let path = config.dir().join("cooper").join("queries.toml");
-    std::fs::write(&path, "this is [not toml").unwrap();
-    let mut ws = TestWorkspace::open(&config);
-    ws.connect("shop");
-    let (text, error) = status(&ws).expect("a status message");
-    assert!(
-        error && text.starts_with("Failed to read saved queries: "),
-        "{text}"
-    );
-    assert!(list_state(&ws).2, "the list is in the failed state");
-
-    std::fs::remove_file(&path).unwrap();
-    queries(&config)
-        .save("shop", &query("fixed", "select 1"))
-        .unwrap();
-    ws.press("cmd-o cmd-r");
-    assert!(!list_state(&ws).2);
-    assert_eq!(names(&ws), ["fixed"]);
-}
-
-#[test]
-fn drafts_survive_a_reconnect_unbound() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-    ws.press("cmd-o enter");
-    ws.type_text(" -- draft");
-    ws.press("cmd-w");
-    ws.wait_until("the tab to close", |_| true);
-    assert_eq!(ws.state().test_tabs(), Vec::<(String, bool)>::new());
-
-    ws.connect("shop");
-    assert_eq!(text(&ws), "select 1 -- draft");
-    assert_eq!(title(&ws), "· new*", "a restored draft is not bound");
-
-    ws.press("cmd-e");
-    ws.press("cmd-a backspace");
-    ws.press("cmd-w");
-    ws.connect("shop");
-    assert_eq!(text(&ws), "");
-}
-
-#[test]
-fn unicode_values_and_names_do_not_break_anything() {
+fn unicode_values_do_not_break_anything() {
     let config = TestConfig::with_sample_dbs(&["shop"]);
     let mut ws = shop_console(&config);
     set_sql(
@@ -910,59 +448,8 @@ fn unicode_values_and_names_do_not_break_anything() {
     );
     ws.press("down pagedown end home right left escape");
 
-    let name = "長い名前".repeat(20);
-    ws.press("cmd-e");
-    ws.press("cmd-s");
-    ws.type_text(&name);
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(ws.console().saved_name(), Some(name.as_str()));
-    assert_eq!(names(&ws), [name]);
-
     ws.resize((120., 90.));
     ws.resize((1280., 820.));
-}
-
-#[test]
-fn a_failed_save_keeps_the_dialog_open() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("kept", "select 0"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-    ws.type_text("select 1");
-
-    let dir = config.dir().join("cooper");
-    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    std::fs::set_permissions(
-        dir.join("queries.toml"),
-        std::fs::Permissions::from_mode(0o444),
-    )
-    .unwrap();
-    ws.press("cmd-s");
-    ws.type_text("new one");
-    ws.press("enter");
-    let (note, overwrite) = save_note(&ws);
-    std::fs::set_permissions(
-        dir.join("queries.toml"),
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
-
-    let note = note.expect("a note");
-    assert!(note.starts_with("Failed to save: "), "{note}");
-    assert!(!overwrite);
-    assert!(ws.has_dialog(), "the dialog stays open");
-    ws.press("escape");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(title(&ws), "· new*");
-    assert_eq!(
-        queries(&config).load("shop").unwrap(),
-        [query("kept", "select 0")]
-    );
 }
 
 fn table_page_rows(ws: &TestWorkspace) -> Option<usize> {
@@ -995,43 +482,6 @@ fn opening_a_table_hides_the_console_and_keeps_it() {
         Some(false)
     );
     assert_eq!(table_page_rows(&ws), page);
-}
-
-#[test]
-fn confirmations_answer_to_the_keyboard() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-    ws.type_text("select 2");
-
-    ws.press("cmd-o enter");
-    assert!(ws.has_dialog());
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "select 1");
-    assert!(editor_focused(&ws));
-
-    ws.type_text(" + 1");
-    ws.press("cmd-o enter");
-    ws.press("escape");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "select 1 + 1");
-    assert!(saved_focused(&ws));
-
-    ws.press("cmd-e cmd-shift-n");
-    assert!(ws.has_dialog());
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "");
-    assert!(editor_focused(&ws));
-
-    ws.press("cmd-o cmd-backspace");
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(names(&ws), Vec::<String>::new());
-    assert!(saved_focused(&ws));
 }
 
 #[test]
@@ -1072,33 +522,6 @@ fn home_and_end_move_along_the_row_of_the_result_grid() {
     assert_eq!(selected_cell(&ws), Some((1, 1)));
     ws.press("home enter");
     assert_eq!(record(&ws), Some(1));
-}
-
-#[test]
-fn a_click_on_a_saved_row_moves_the_keyboard_to_the_list() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let store = queries(&config);
-    store.save("shop", &query("one", "select 1")).unwrap();
-    store.save("shop", &query("two", "select 2")).unwrap();
-    let mut ws = shop_console(&config);
-
-    ws.press("cmd-o");
-    ws.type_text("o");
-    assert!(
-        ws.browser().saved.filter.focused,
-        "typing went to the search"
-    );
-    ws.click("saved-row-1");
-    assert_eq!(selected(&ws).as_deref(), Some("two"));
-    assert!(ws.is_focused(crate::browser::saved::PANE));
-    assert!(!ws.browser().saved.filter.focused);
-    ws.press("home");
-    assert_eq!(
-        selected(&ws).as_deref(),
-        Some("one"),
-        "Home moves in the list"
-    );
-    assert_eq!(list_state(&ws).1, "o");
 }
 
 #[test]
@@ -1154,11 +577,8 @@ fn tab_indents_and_return_keeps_the_indentation() {
 }
 
 #[test]
-fn escape_leaves_the_idle_console_and_clears_the_list_search() {
+fn escape_leaves_the_idle_console() {
     let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
     let mut ws = shop_console(&config);
 
     ws.type_text("select 1");
@@ -1166,14 +586,6 @@ fn escape_leaves_the_idle_console_and_clears_the_list_search() {
     assert!(tree_focused(&ws));
     assert_eq!(text(&ws), "select 1");
     assert_eq!(ws.browser().main, Main::Console);
-
-    ws.press("cmd-o");
-    ws.type_text("on");
-    ws.press("escape");
-    assert!(saved_focused(&ws));
-    assert_eq!(list_state(&ws).1, "");
-    ws.press("escape");
-    assert!(tree_focused(&ws));
 }
 
 #[test]
@@ -1188,8 +600,6 @@ fn f6_and_cmd_j_reach_the_result_grid() {
         "no result: F6 from the editor goes to the tree"
     );
     ws.press("f6");
-    assert!(saved_focused(&ws));
-    ws.press("f6");
     assert!(editor_focused(&ws));
     ws.press("cmd-j");
     assert!(editor_focused(&ws));
@@ -1198,10 +608,7 @@ fn f6_and_cmd_j_reach_the_result_grid() {
         Some("No result yet · run the script with ⌘⏎ or F5")
     );
     ws.press("shift-f6");
-    assert!(
-        saved_focused(&ws),
-        "back from the editor: the saved queries"
-    );
+    assert!(tree_focused(&ws), "back from the editor: the tree");
 
     ws.press("cmd-e");
     set_sql(&mut ws, "SELECT id, name FROM customers ORDER BY id");
@@ -1224,7 +631,7 @@ fn f6_and_cmd_j_reach_the_result_grid() {
     ws.press("shift-f6");
     assert!(editor_focused(&ws));
     ws.press("shift-f6");
-    assert!(saved_focused(&ws));
+    assert!(tree_focused(&ws));
     ws.press("f6 f6");
     assert!(grid_focused(&ws));
 
@@ -1283,9 +690,6 @@ fn escape_in_the_result_grid_goes_to_the_tree_and_keeps_the_selection() {
 #[test]
 fn a_running_script_is_cancelled_from_any_pane() {
     let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
     let mut ws = shop_console(&config);
     set_sql(&mut ws, ENDLESS);
     let start = |ws: &mut TestWorkspace| {
@@ -1321,36 +725,20 @@ fn a_running_script_is_cancelled_from_any_pane() {
     assert!(!ws.tree().is_filtering());
 
     start(&mut ws);
-    ws.press("cmd-o");
-    assert!(saved_focused(&ws));
+    ws.press("cmd-p");
+    assert!(tree_focused(&ws));
     ws.press("cmd-.");
     assert_eq!(ws.wait_script_done(), "cancelled");
-    assert!(saved_focused(&ws));
+    assert!(tree_focused(&ws));
 
     start(&mut ws);
-    ws.press("cmd-o");
-    ws.type_text("on");
-    ws.press("escape");
-    assert_eq!(ws.wait_script_done(), "cancelled");
-    assert_eq!(list_state(&ws).1, "on");
-    start(&mut ws);
-    ws.press("cmd-o");
-    ws.type_text("e");
-    ws.press("cmd-.");
-    assert_eq!(ws.wait_script_done(), "cancelled");
-    assert_eq!(list_state(&ws).1, "one");
-
-    start(&mut ws);
-    ws.press("cmd-o f5");
-    ws.click_label("Replace");
-    wait_dialog_closed(&mut ws);
+    ws.press("cmd-enter");
     assert_eq!(
         hint(&ws).as_deref(),
         Some("A script is already running · Esc cancels it")
     );
-    ws.press("cmd-o escape");
+    ws.press("escape");
     assert_eq!(ws.wait_script_done(), "cancelled");
-    set_sql(&mut ws, ENDLESS);
 
     start(&mut ws);
     ws.dispatch(Command::FocusTree);
@@ -1362,7 +750,7 @@ fn a_running_script_is_cancelled_from_any_pane() {
         running_status(&ws).is_some(),
         "shown with the table in the main area"
     );
-    ws.press("cmd-p f6 f6");
+    ws.press("cmd-p f6");
     assert_eq!(focused_pane(&ws), Some(Pane::Main));
     ws.press("escape");
     assert_eq!(ws.wait_script_done(), "cancelled");
@@ -1372,91 +760,6 @@ fn a_running_script_is_cancelled_from_any_pane() {
         Some(Pane::Main),
         "that Esc only cancelled"
     );
-}
-
-#[test]
-fn a_new_script_from_the_result_grid_focuses_the_editor() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let mut ws = shop_console(&config);
-    set_sql(&mut ws, "SELECT 'abc' AS x");
-    ws.press("cmd-enter");
-    ws.wait_script_done();
-    ws.click_label("abc");
-    assert!(result_focused(&ws));
-
-    ws.press("cmd-shift-n");
-    assert!(ws.has_dialog());
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(text(&ws), "");
-    assert!(
-        editor_focused(&ws),
-        "the new script has the focus, not the result"
-    );
-}
-
-#[test]
-fn declining_to_replace_the_script_keeps_the_table_shown() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-    ws.type_text("select 2");
-    ws.open_table("customers");
-    assert_eq!(ws.browser().main, Main::Table);
-
-    ws.press("cmd-o enter");
-    assert!(ws.has_dialog());
-    assert_eq!(ws.browser().main, Main::Table, "not before the answer");
-    ws.press("escape");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(ws.browser().main, Main::Table, "no: the table stays");
-    assert!(saved_focused(&ws));
-    assert_eq!(text(&ws), "select 2");
-
-    ws.press("enter");
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert_eq!(ws.browser().main, Main::Console);
-    assert_eq!(text(&ws), "select 1");
-    assert!(editor_focused(&ws));
-}
-
-#[test]
-fn enter_in_the_list_search_opens_the_query_once() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let store = queries(&config);
-    store.save("shop", &query("one", "select 1")).unwrap();
-    store.save("shop", &query("two", "select 2")).unwrap();
-    let mut ws = shop_console(&config);
-    let replace_dialogs = |ws: &TestWorkspace| ws.all_by_label("Replace").len();
-
-    ws.type_text("select 9");
-    ws.press("cmd-o");
-    ws.type_text("tw");
-    assert_eq!(selected(&ws).as_deref(), Some("two"));
-    ws.press("enter");
-    assert_eq!(replace_dialogs(&ws), 1, "one question");
-    ws.press("enter");
-    wait_dialog_closed(&mut ws);
-    assert!(!ws.has_dialog(), "no second question left behind");
-    assert_eq!(title(&ws), "· two");
-    assert!(editor_focused(&ws));
-
-    for keys in ["f5", "cmd-enter"] {
-        ws.type_text(" -- edited");
-        ws.press("cmd-o");
-        ws.type_text("o");
-        ws.press(keys);
-        assert_eq!(replace_dialogs(&ws), 1, "{keys}: one question");
-        ws.press("enter");
-        wait_dialog_closed(&mut ws);
-        assert!(!ws.has_dialog(), "{keys}");
-        assert!(ws.wait_script_done().starts_with("1 row"), "{keys}");
-        ws.press("cmd-o escape");
-        ws.press("cmd-e");
-    }
 }
 
 #[test]
@@ -1663,62 +966,6 @@ fn a_focused_element_that_is_no_longer_drawn_gives_the_keyboard_back() {
 }
 
 #[test]
-fn escape_closes_the_saved_list_menu_before_it_cancels_the_script() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    queries(&config)
-        .save("shop", &query("one", "select 1"))
-        .unwrap();
-    let mut ws = shop_console(&config);
-    set_sql(&mut ws, ENDLESS);
-    ws.press("cmd-enter");
-    assert!(is_running(&ws));
-
-    ws.press("cmd-o");
-    right_click_first_saved_row(&mut ws);
-    assert!(menu_open(&ws), "the right click opened the row's menu");
-    ws.press("escape");
-    assert!(!menu_open(&ws), "the first Esc closes the menu");
-    assert!(is_running(&ws), "and does not cancel the script");
-    assert_eq!(ticker(&ws).as_deref(), Some("running… 0s"));
-    assert!(
-        saved_focused(&ws),
-        "the menu gave the focus back to the list"
-    );
-    assert!(running_status(&ws).is_some());
-
-    press_now(&mut ws, "escape");
-    assert_eq!(
-        ticker(&ws).as_deref(),
-        Some("cancelling…"),
-        "the next Esc cancels"
-    );
-    assert_eq!(ws.wait_script_done(), "cancelled");
-}
-
-#[test]
-fn the_save_dialog_footer_buttons_keep_their_own_width() {
-    let config = TestConfig::with_sample_dbs(&["shop"]);
-    let mut ws = shop_console(&config);
-    ws.type_text("select 1");
-    ws.press("cmd-s");
-    assert!(ws.has_dialog());
-
-    let cancel = ws
-        .within_by_label("save-query-dialog", "Cancel")
-        .expect("the dialog's Cancel button")
-        .rect;
-    let save = ws
-        .find("save-query-confirm")
-        .expect("the dialog's Save button")
-        .rect;
-    assert!(cancel[2] < 120., "Cancel stretched: {cancel:?}");
-    assert!(
-        save[0] - (cancel[0] + cancel[2]) < 16.,
-        "{cancel:?} / {save:?}"
-    );
-}
-
-#[test]
 fn snapshots_of_the_console() {
     let Some(dir) = std::env::var_os("CONSOLE_SNAPS") else {
         return;
@@ -1730,18 +977,6 @@ fn snapshots_of_the_console() {
             crate::test_support::snap_png(&mut ws.rt, &dir.join(format!("{name}-{theme}.png")));
         };
         let config = TestConfig::with_sample_dbs(&["shop"]);
-        queries(&config)
-            .save("shop", &query("customers by country", "SELECT country, count(*) AS n\nFROM customers\nGROUP BY country\nORDER BY n DESC"))
-            .unwrap();
-        queries(&config)
-            .save(
-                "shop",
-                &query(
-                    "recent orders",
-                    "select * from orders order by id desc limit 20",
-                ),
-            )
-            .unwrap();
         let mut ws = TestWorkspace::open_with(config.store(), dark);
         ws.connect("shop");
         ws.press("cmd-e");
@@ -1777,20 +1012,7 @@ fn snapshots_of_the_console() {
         ws.press("cmd-enter");
         ws.wait_script_done();
         shot(&mut ws, "07-completed");
-        ws.press("cmd-o down enter");
-        shot(&mut ws, "08-replace-alert");
-        ws.press("enter");
-        ws.type_text(" -- edited");
-        ws.press("cmd-shift-s");
-        ws.type_text("customers by country");
-        ws.press("enter");
-        shot(&mut ws, "09-save-exists");
-        ws.press("escape");
-        ws.press("cmd-o");
-        ws.type_text("c");
-        right_click_first_saved_row(&mut ws);
-        shot(&mut ws, "10-saved-menu");
-        ws.press("escape escape cmd-e");
+        ws.press("cmd-e");
         set_sql(
             &mut ws,
             &format!(
@@ -1951,7 +1173,6 @@ fn the_editor_closes_brackets_and_quotes_and_splits_brackets_on_return() {
     type_keys(&mut ws, "select count(");
     assert_eq!(text(&ws), "select count()");
     assert_eq!(caret(&ws), 13, "the caret sits between the pair");
-    assert_eq!(title(&ws), "· new*");
     type_keys(&mut ws, "*)");
     assert_eq!(text(&ws), "select count(*)", "a typed closer steps over");
     assert_eq!(caret(&ws), text(&ws).len());

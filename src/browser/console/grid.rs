@@ -632,9 +632,7 @@ fn grid_row(s: &Workspace, tab: TabId, i: usize) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_COLUMN_CHARS, NULL, Widest, clip, copy_cell, copy_row, data_column, widest_texts,
-    };
+    use super::{MAX_COLUMN_CHARS, NULL, Widest, clip, copy_cell, copy_row, widest_texts};
     use crate::db::{ColumnInfo, FullValue, ScriptResult};
 
     fn column(name: &str, type_name: &str) -> ColumnInfo {
@@ -716,12 +714,5 @@ mod tests {
             "out of range is not a panic"
         );
         assert_eq!(copy_row(&result, 0), "1\tmulti\nline\tNULL");
-    }
-
-    #[test]
-    fn column_zero_is_the_gutter() {
-        assert_eq!(data_column(0), None);
-        assert_eq!(data_column(1), Some(0));
-        assert_eq!(data_column(4), Some(3));
     }
 }

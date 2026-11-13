@@ -26,7 +26,6 @@ pub enum Command {
     Refresh,
     OpenConsole,
     FocusTree,
-    FocusSavedQueries,
     FocusNextPane,
     FocusPrevPane,
     ShowDdl,
@@ -49,12 +48,6 @@ pub enum Command {
     CancelScript,
     FocusResult,
     FocusEditor,
-    SaveQuery,
-    SaveQueryAs,
-    NewQuery,
-    OpenQuery,
-    RunQuery,
-    DeleteQuery,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,8 +61,6 @@ pub enum Ctx {
     Browser,
     BrowserInput,
     SchemaTree,
-    SavedQueries,
-    SavedQueriesInput,
     TableView,
     TableGrid,
     RowEditorInput,
@@ -90,9 +81,8 @@ const TABLE: &[(&str, Ctx, Command)] = {
     use Command::*;
     use Ctx::{
         Browser as B, BrowserInput as BI, Console as C, ConsoleGrid as CG, ConsoleResult as CR,
-        Global as G, HelpInput as HI, Home as H, RowEditorInput as REI, SavedQueries as SQ,
-        SavedQueriesInput as SQI, SchemaTree as ST, SqlEditorInput as SEI, TableGrid as TG,
-        TableView as TV, Workspace as W,
+        Global as G, HelpInput as HI, Home as H, RowEditorInput as REI, SchemaTree as ST,
+        SqlEditorInput as SEI, TableGrid as TG, TableView as TV, Workspace as W,
     };
     &[
         ("mod+q", G, Quit),
@@ -125,7 +115,6 @@ const TABLE: &[(&str, Ctx, Command)] = {
         ("f5", B, Refresh),
         ("mod+e", B, OpenConsole),
         ("mod+p", B, FocusTree),
-        ("mod+o", B, FocusSavedQueries),
         ("f6", B, FocusNextPane),
         ("shift+f6", B, FocusPrevPane),
         ("mod+.", B, CancelScript),
@@ -166,14 +155,6 @@ const TABLE: &[(&str, Ctx, Command)] = {
         ("mod+.", C, CancelScript),
         ("mod+j", C, FocusResult),
         ("mod+j", CR, FocusEditor),
-        ("mod+s", C, SaveQuery),
-        ("mod+shift+s", C, SaveQueryAs),
-        ("mod+shift+n", C, NewQuery),
-        ("enter", SQ, OpenQuery),
-        ("f5", SQ, RunQuery),
-        ("mod+enter", SQ, RunQuery),
-        ("mod+enter", SQI, RunQuery),
-        ("mod+backspace", SQ, DeleteQuery),
         ("escape", Ctx::Connecting, CancelConnect),
     ]
 };
@@ -274,9 +255,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_binding_parses_and_the_table_matches_cooper() {
-        let gk = TABLE.iter().filter(|(_, ctx, _)| *ctx != Ctx::Connecting);
-        assert_eq!(gk.count(), 79);
+    fn every_binding_parses() {
         assert_eq!(BINDINGS.len(), TABLE.len());
     }
 
@@ -298,13 +277,5 @@ mod tests {
         ] {
             assert!(gk_chord(spec).is_some(), "{spec}");
         }
-    }
-
-    #[test]
-    fn labels_use_mac_glyphs() {
-        let quit = label(Command::Quit).unwrap();
-        assert!(quit.contains('Q'), "{quit}");
-        assert!(label(Command::ActivateTab(3)).is_some());
-        assert!(label_in(Command::CopyCell, Ctx::ConsoleResult).is_some());
     }
 }

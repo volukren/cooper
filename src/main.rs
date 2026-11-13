@@ -8,7 +8,6 @@ mod help;
 mod highlight;
 mod icons;
 mod keys;
-mod queries;
 #[cfg(test)]
 mod test_support;
 mod theme;

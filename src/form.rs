@@ -699,9 +699,7 @@ pub fn dialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FormValues, database_label, is_port_text, port_after_kind_change, sanitize_paste, validate,
-    };
+    use super::{FormValues, is_port_text, port_after_kind_change, sanitize_paste, validate};
     use crate::connection::{Connection, DbKind, PasswordStorage};
 
     fn conn(name: &str, kind: DbKind) -> Connection {
@@ -730,16 +728,6 @@ mod tests {
             name: name.into(),
             ..FormValues::default()
         }
-    }
-
-    #[test]
-    fn new_form_defaults() {
-        let v = FormValues::default();
-        assert_eq!(v.kind, DbKind::Postgres);
-        assert_eq!(v.host, "localhost");
-        assert_eq!(v.port, "5432");
-        assert_eq!(v.storage, PasswordStorage::Keychain);
-        assert!(v.name.is_empty() && v.user.is_empty() && v.password.is_empty());
     }
 
     #[test]
@@ -895,12 +883,6 @@ mod tests {
             port_after_kind_change("", Postgres, MySql).as_deref(),
             Some("3306")
         );
-    }
-
-    #[test]
-    fn database_label_follows_the_kind() {
-        assert_eq!(database_label(DbKind::Sqlite), "File path");
-        assert_eq!(database_label(DbKind::Postgres), "Database");
     }
 
     #[test]

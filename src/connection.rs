@@ -7,8 +7,6 @@ use color_eyre::{
 use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Item};
 
-use crate::queries::QueryStore;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DbKind {
@@ -316,10 +314,6 @@ impl Store {
 
     fn write(&self, doc: &DocumentMut) -> Result<()> {
         write_private(&self.path, &doc.to_string())
-    }
-
-    pub fn queries(&self) -> QueryStore {
-        QueryStore::at(self.path.with_file_name("queries.toml"))
     }
 }
 

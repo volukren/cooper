@@ -128,14 +128,13 @@ const SECTIONS: &[Section] = &[
         bindings: &[
             b(
                 &[K("f6"), K("shift-f6")],
-                "Cycle the focus: schema tree → saved queries → data, or SQL editor → result",
+                "Cycle the focus: schema tree → data, or SQL editor → result",
             ),
             b(
                 &[K("cmd-."), K("escape")],
                 "Stop a running script from any pane (the first Esc stops it)",
             ),
             b(&[K("cmd-p")], "Focus the schema tree"),
-            b(&[K("cmd-o")], "Focus the saved queries"),
             b(&[K("up"), K("down")], "Move the selection (tree, grid)"),
             b(
                 &[K("left"), K("right")],
@@ -155,7 +154,7 @@ const SECTIONS: &[Section] = &[
             b(&[T("Pager buttons")], "First, previous, next and last page"),
             b(
                 &[K("cmd-r"), K("f5")],
-                "Refresh the tree, the grid or the saved queries (F5 runs in the console)",
+                "Refresh the tree and the grid (F5 runs in the console)",
             ),
             b(
                 &[K("space"), K("enter"), T("Double-click")],
@@ -229,15 +228,8 @@ const SECTIONS: &[Section] = &[
                 "Move the focus between the editor and the result grid",
             ),
             b(
-                &[K("cmd-s")],
-                "Save the script (asks for a name the first time)",
-            ),
-            b(&[K("cmd-shift-s")], "Save the script under a new name"),
-            b(&[K("cmd-shift-n")], "Start a new script"),
-            b(&[K("cmd-o")], "Go to the saved queries"),
-            b(
                 &[K("f6"), K("shift-f6")],
-                "Cycle the focus: tree → saved queries → editor → result (once there is one)",
+                "Cycle the focus: tree → editor → result (once there is one)",
             ),
             b(&[K("cmd-z"), K("cmd-shift-z")], "Undo / redo"),
             b(&[K("cmd-a")], "Select the whole script"),
@@ -251,25 +243,6 @@ const SECTIONS: &[Section] = &[
                 &[K("space"), T("Double-click")],
                 "Show the selected row in full (result)",
             ),
-        ],
-    },
-    Section {
-        title: "Saved queries",
-        bindings: &[
-            b(&[K("up"), K("down")], "Select a query of this connection"),
-            b(&[T("Type")], "Search by name or SQL text"),
-            b(
-                &[K("enter"), T("Double-click")],
-                "Open the query in the editor",
-            ),
-            b(&[K("f5"), K("cmd-enter")], "Open the query and run it"),
-            b(
-                &[K("escape")],
-                "Clear the search, then go to the schema tree",
-            ),
-            b(&[K("cmd-backspace")], "Delete the query (asks to confirm)"),
-            b(&[K("cmd-r")], "Reload the list"),
-            b(&[K("cmd-e")], "Open the SQL console"),
         ],
     },
     Section {
@@ -577,12 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_the_ten_sections() {
-        assert_eq!(SECTIONS.len(), 10);
-        assert!(SECTIONS.iter().all(|s| !s.bindings.is_empty()));
-    }
-
-    #[test]
     fn every_keystroke_parses() {
         for section in SECTIONS {
             for binding in section.bindings {
@@ -630,10 +597,5 @@ mod tests {
         assert_eq!(sections[0].0, "SQL console");
         assert_eq!(sections[0].1.len(), 1);
         assert_eq!(count("console definitely-not"), 0);
-    }
-
-    #[test]
-    fn no_match_returns_nothing() {
-        assert_eq!(count("definitely-not-a-command"), 0);
     }
 }

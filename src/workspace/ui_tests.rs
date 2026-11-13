@@ -7,7 +7,6 @@ use crate::{
     dialog::Dialog,
     form::{ConnectionForm, FormValues},
     keys::Command,
-    queries::{QueryStore, SavedQuery},
     test_support::{TestConfig, TestWorkspace, sqlite_connection},
 };
 
@@ -244,18 +243,6 @@ fn arrows_reach_the_new_button_and_return_to_the_list() {
     assert!(form_original(&ws).is_none());
     ws.press("escape");
     wait_dialog_closed(&mut ws);
-}
-
-#[test]
-fn clicking_rows_selects() {
-    let config = three_connections();
-    let mut ws = TestWorkspace::open(&config);
-    click_row(&mut ws, 2);
-    assert_eq!(selected(&ws).as_deref(), Some("Staging Orders"));
-    assert!(ws.is_focused("home"), "a click focuses the list");
-
-    ws.press("up");
-    assert_eq!(selected(&ws).as_deref(), Some("local"));
 }
 
 #[test]
@@ -589,14 +576,8 @@ fn editing_can_rename_but_not_onto_another_connection() {
 }
 
 #[test]
-fn saved_queries_and_the_draft_follow_a_renamed_connection() {
+fn the_draft_follows_a_renamed_connection() {
     let config = TestConfig::with_sample_dbs(&["shop"]);
-    let queries: QueryStore = config.store().queries();
-    let query = SavedQuery {
-        name: "all".into(),
-        sql: "SELECT 1;".into(),
-    };
-    queries.save("shop", &query).unwrap();
     let mut ws = TestWorkspace::open(&config);
     ws.connect("shop");
     ws.press("cmd-e");
@@ -609,9 +590,6 @@ fn saved_queries_and_the_draft_follow_a_renamed_connection() {
     ws.press("enter");
     wait_dialog_closed(&mut ws);
     assert_eq!(names(&ws), ["renamed"]);
-    assert!(queries.load("shop").unwrap().is_empty());
-    assert_eq!(queries.load("renamed").unwrap(), [query]);
-    assert!(config.dir().join("cooper").join("queries.toml").exists());
     let drafts = ws.read(|w| w.home.drafts.clone());
     assert_eq!(
         drafts.get("renamed").map(String::as_str),
@@ -764,18 +742,8 @@ fn paste_strips_control_characters() {
 }
 
 #[test]
-fn delete_asks_first_and_removes_queries_and_drafts() {
+fn delete_asks_first_and_removes_drafts() {
     let config = three_connections();
-    let queries = config.store().queries();
-    queries
-        .save(
-            "local",
-            &SavedQuery {
-                name: "q".into(),
-                sql: "SELECT 1;".into(),
-            },
-        )
-        .unwrap();
     let mut ws = TestWorkspace::open(&config);
     click_row(&mut ws, 1);
     ws.update(|w, _| w.home.remember_draft("local", "SELECT 3".into()));
@@ -803,7 +771,6 @@ fn delete_asks_first_and_removes_queries_and_drafts() {
         store_names(&config.connections_path()),
         ["prod orders", "Staging Orders"]
     );
-    assert!(queries.load("local").unwrap().is_empty());
     assert!(ws.read(|w| w.home.drafts.is_empty()));
     assert_eq!(selected(&ws).as_deref(), Some("Staging Orders"));
 

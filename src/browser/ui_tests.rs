@@ -478,15 +478,13 @@ fn f6_cycles_the_panes() {
     let (_config, _path, mut ws) = connect_fixture();
     assert_eq!(focused_pane(&ws), Some(Pane::Tree));
     ws.press("f6");
-    assert_eq!(focused_pane(&ws), Some(Pane::Saved));
-    ws.press("f6");
     assert_eq!(focused_pane(&ws), Some(Pane::Main));
     ws.press("f6");
     assert_eq!(focused_pane(&ws), Some(Pane::Tree));
     ws.press("shift-f6");
     assert_eq!(focused_pane(&ws), Some(Pane::Main));
     ws.dispatch(Command::FocusPrevPane);
-    assert_eq!(focused_pane(&ws), Some(Pane::Saved));
+    assert_eq!(focused_pane(&ws), Some(Pane::Tree));
 
     ws.open_table("people");
     assert_eq!(focused_pane(&ws), Some(Pane::Main));
@@ -494,12 +492,10 @@ fn f6_cycles_the_panes() {
     assert_eq!(focused_pane(&ws), Some(Pane::Tree));
     ws.type_text("x");
     ws.dispatch(Command::FocusNextPane);
-    assert_eq!(focused_pane(&ws), Some(Pane::Saved));
-    ws.press("f6");
     assert_eq!(focused_pane(&ws), Some(Pane::Main));
     assert!(grid_state(&ws).3, "the row view stayed open");
 
-    ws.press("cmd-e f6 f6 f6");
+    ws.press("cmd-e f6 f6");
     assert_eq!(focused_pane(&ws), Some(Pane::Main));
     assert_eq!(main(&ws), Main::Console);
     ws.dispatch(Command::Refresh);
@@ -758,7 +754,7 @@ fn the_tree_header_belongs_to_the_tree_pane() {
     ws.wait_tree_loaded();
     assert_eq!(focused_pane(&ws), Some(Pane::Tree));
     ws.press("f6");
-    assert_eq!(focused_pane(&ws), Some(Pane::Saved));
+    assert_eq!(focused_pane(&ws), Some(Pane::Main));
     ws.press("shift-f6");
     ws.click("refresh-tree");
     ws.press("cmd-d");
@@ -785,7 +781,7 @@ fn keyboard_focus_moves_show_without_another_event() {
     assert!(ws.is_focused(tree::ROOT_KEY));
     assert_eq!(ws.browser().focused, Some(Pane::Tree));
     press_like_a_window(&mut ws, "f6");
-    assert_eq!(ws.browser().focused, Some(Pane::Saved));
+    assert_eq!(ws.browser().focused, Some(Pane::Main));
     press_like_a_window(&mut ws, "cmd-p");
     assert_eq!(ws.browser().focused, Some(Pane::Tree));
     press_like_a_window(&mut ws, "shift-f6");
@@ -911,12 +907,6 @@ fn the_tree_menu_closes_when_anything_else_happens() {
 
     ws.press("cmd-p");
     open_menu(&mut ws);
-    ws.press("cmd-o");
-    assert!(!ddl_menu_open(&ws));
-    assert_eq!(focused_pane(&ws), Some(Pane::Saved));
-
-    ws.press("cmd-p");
-    open_menu(&mut ws);
     ws.press("cmd-/");
     assert!(ws.has_dialog());
     ws.press("escape");
@@ -963,40 +953,6 @@ fn a_click_into_a_field_clears_the_status() {
         Some(("Set with the focus".to_string(), false)),
         "a status set by the same change stays"
     );
-}
-
-#[test]
-fn cmd_backspace_in_the_saved_search_edits_the_text() {
-    let config = TestConfig::empty();
-    fixture(&config);
-    config
-        .store()
-        .queries()
-        .save(
-            "fixture",
-            &crate::queries::SavedQuery {
-                name: "orders report".to_string(),
-                sql: "select 1".to_string(),
-            },
-        )
-        .unwrap();
-    let mut ws = TestWorkspace::open(&config);
-    ws.connect("fixture");
-    ws.press("cmd-o");
-    ws.type_text("ord");
-    assert!(ws.browser().saved.filter.focused);
-    ws.press("cmd-backspace");
-    assert!(!ws.has_dialog(), "{:?}", ws.dialog_label());
-    assert_eq!(ws.browser().saved.filter.text, "");
-    ws.press("enter space");
-    assert_eq!(ws.browser().saved.names(), ["orders report"]);
-
-    ws.press("cmd-o");
-    assert!(!ws.browser().saved.filter.focused);
-    ws.press("cmd-backspace");
-    assert!(ws.has_dialog(), "the list still asks to delete");
-    ws.press("escape");
-    assert_eq!(ws.browser().saved.names(), ["orders report"]);
 }
 
 #[test]

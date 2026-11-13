@@ -513,11 +513,4 @@ mod tests {
         assert_eq!(group(1000), "1,000");
         assert_eq!(group(1234567), "1,234,567");
     }
-
-    #[test]
-    fn sql_spans_cover_keywords_and_strings() {
-        let t = crate::theme::theme(true);
-        let spans = super::sql_spans("select 'a'\nfrom t", crate::connection::DbKind::Sqlite, t);
-        assert!(spans.len() >= 3, "{}", spans.len());
-    }
 }

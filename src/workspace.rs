@@ -387,8 +387,7 @@ impl Workspace {
         };
         let draft =
             browser::smoke_sql().or_else(|| self.home.drafts.get(&connection.name).cloned());
-        let queries = self.home.queries();
-        let mut browser = Browser::new(id, connection.clone(), session, queries, draft);
+        let mut browser = Browser::new(id, connection.clone(), session, draft);
         browser.set_server_info(server_info);
         if let Some(waker) = self.waker.clone() {
             browser.set_waker(waker);
@@ -922,13 +921,6 @@ fn tab_strip(s: &Workspace, t: &Theme) -> El {
                         .child(home_tab)
                         .children(tabs),
                 ),
-        )
-        .child(
-            text("⌘1…9 · ⌃Tab switch tabs")
-                .key("tab-hint")
-                .font(t.text_xs)
-                .color(t.muted)
-                .px(12.0),
         )
 }
 

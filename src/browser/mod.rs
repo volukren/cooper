@@ -1,6 +1,5 @@
 pub mod console;
 pub mod ddl;
-pub mod saved;
 pub mod table;
 pub mod tree;
 
@@ -18,15 +17,12 @@ use crate::{
     dialog::Dialog,
     icons,
     keys::{self, Command, Ctx},
-    queries::QueryStore,
     theme::Theme,
     ui::{self, Split},
     workspace::{TabId, Workspace},
 };
 
-use self::{
-    console::Console, ddl::DdlView, saved::SavedQueries, table::TableView, tree::SchemaTree,
-};
+use self::{console::Console, ddl::DdlView, table::TableView, tree::SchemaTree};
 
 pub enum Polled {
     Idle,
@@ -43,12 +39,11 @@ pub enum Main {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
     Tree,
-    Saved,
     Main,
 }
 
 pub fn cycle_pane(current: Option<Pane>, forward: bool) -> Pane {
-    const ORDER: [Pane; 3] = [Pane::Tree, Pane::Saved, Pane::Main];
+    const ORDER: [Pane; 2] = [Pane::Tree, Pane::Main];
     let index = current
         .and_then(|pane| ORDER.iter().position(|p| *p == pane))
         .unwrap_or(0);
@@ -96,7 +91,6 @@ impl Scrolls {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Fields {
     tree: bool,
-    saved: bool,
     sql: bool,
     row: Option<usize>,
 }
@@ -105,7 +99,6 @@ impl Fields {
     fn of(b: &Browser) -> Self {
         Self {
             tree: b.tree.filter.focused,
-            saved: b.saved.filter.focused,
             sql: b.console.sql.focused,
             row: b.table.draft.as_ref().and_then(|draft| draft.focused()),
         }
@@ -113,7 +106,6 @@ impl Fields {
 
     fn entered(self, before: Self) -> bool {
         (self.tree && !before.tree)
-            || (self.saved && !before.saved)
             || (self.sql && !before.sql)
             || (self.row.is_some() && self.row != before.row)
     }
@@ -125,7 +117,6 @@ pub struct Browser {
     pub server_info: Option<String>,
     pub session: Rc<Session>,
     pub tree: SchemaTree,
-    pub saved: SavedQueries,
     pub table: TableView,
     pub console: Console,
     pub ddl: Option<DdlView>,
@@ -135,7 +126,6 @@ pub struct Browser {
     pub focused: Option<Pane>,
     pub status: Option<(String, bool)>,
     pub sidebar: Split,
-    pub sidebar_split: Split,
     pub drains: usize,
     pub scrolls: Scrolls,
     status_gen: u64,
@@ -144,23 +134,15 @@ pub struct Browser {
 }
 
 impl Browser {
-    pub fn new(
-        id: TabId,
-        connection: Connection,
-        session: Session,
-        queries: QueryStore,
-        draft: Option<String>,
-    ) -> Self {
+    pub fn new(id: TabId, connection: Connection, session: Session, draft: Option<String>) -> Self {
         session.drop_in_background();
-        let name = connection.name.clone();
         let mut browser = Self {
             id,
             server_info: None,
             session: Rc::new(session),
             tree: SchemaTree::new(),
-            saved: SavedQueries::new(&name, queries.clone()),
             table: TableView::new(),
-            console: Console::new(&name, queries, draft),
+            console: Console::new(draft),
             ddl: None,
             main: Main::Table,
             table_stale: false,
@@ -168,7 +150,6 @@ impl Browser {
             focused: None,
             status: None,
             sidebar: Split::new(280.0, 180.0, 560.0),
-            sidebar_split: Split::new(300.0, 80.0, 4000.0),
             drains: 0,
             scrolls: Scrolls::default(),
             status_gen: 0,
@@ -176,7 +157,6 @@ impl Browser {
             fields_seen: None,
             connection,
         };
-        saved::reload(&mut browser);
         tree::load(&mut browser);
         browser
     }
@@ -226,10 +206,7 @@ impl Browser {
     }
 
     pub fn close_menus(&mut self) -> bool {
-        let open = self.tree.menu.is_some() || self.saved.menu.is_some();
-        self.tree.menu = None;
-        self.saved.menu = None;
-        open
+        self.tree.menu.take().is_some()
     }
 
     pub fn activate(&self, tx: &mut Tx) {
@@ -252,7 +229,6 @@ impl Browser {
         self.pane = pane;
         match pane {
             Pane::Tree => tree::focus(self, tx),
-            Pane::Saved => saved::focus(self, tx),
             Pane::Main => match self.main {
                 Main::Table => table::focus(self, tx),
                 Main::Console => console::focus(self, tx),
@@ -265,10 +241,6 @@ impl Browser {
         tree::contexts(self, focused, &mut out);
         if !out.is_empty() {
             return Some(Pane::Tree);
-        }
-        saved::contexts(self, focused, &mut out);
-        if !out.is_empty() {
-            return Some(Pane::Saved);
         }
         match self.main {
             Main::Table => table::contexts(self, focused, &mut out),
@@ -303,17 +275,14 @@ impl Browser {
     pub fn contexts(&self, focused: Option<&str>, out: &mut Vec<Ctx>) {
         let before = out.len();
         tree::contexts(self, focused, out);
-        saved::contexts(self, focused, out);
         match self.main {
             Main::Table => table::contexts(self, focused, out),
             Main::Console => console::contexts(self, focused, out),
         }
-        let input = out[before..].iter().any(|ctx| {
-            matches!(
-                ctx,
-                Ctx::SavedQueriesInput | Ctx::RowEditorInput | Ctx::SqlEditorInput
-            )
-        }) || self.tree.filter.focused;
+        let input = out[before..]
+            .iter()
+            .any(|ctx| matches!(ctx, Ctx::RowEditorInput | Ctx::SqlEditorInput))
+            || self.tree.filter.focused;
         if input {
             out.push(Ctx::BrowserInput);
         }
@@ -405,10 +374,6 @@ fn dispatch(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
             b.focus_pane(Pane::Tree, tx);
             true
         }
-        FocusSavedQueries => {
-            b.focus_pane(Pane::Saved, tx);
-            true
-        }
         FocusNextPane | FocusPrevPane => {
             let focused = tx.focused().map(str::to_owned);
             b.cycle_focus(cmd == FocusNextPane, focused.as_deref(), tx);
@@ -416,10 +381,7 @@ fn dispatch(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
         }
         CancelScript => console::cancel(b),
         ShowDdl => tree::run(s, tab, cmd, tx),
-        OpenQuery | RunQuery | DeleteQuery => saved::run(s, tab, cmd, tx),
-        RunScript | FocusResult | FocusEditor | SaveQuery | SaveQueryAs | NewQuery => {
-            console::run(s, tab, cmd, tx)
-        }
+        RunScript | FocusResult | FocusEditor => console::run(s, tab, cmd, tx),
         NextPage | PrevPage | FirstPage | LastPage | EditRow | SaveRow | CancelEdit | NextField
         | PrevField => table::run(s, tab, cmd, tx),
         ToggleRecord | CloseRecord | NextRecord | PrevRecord | CopyCell | CopyRow => match b.main {
@@ -544,23 +506,7 @@ pub fn view(
         .min_h(0.0)
         .padding(4.0)
         .pr(0.0)
-        .child(
-            col()
-                .h(b.sidebar_split.size)
-                .min_h(0.0)
-                .child(tree::view(s, b, t, cx, layer)),
-        )
-        .child(ui::v_handle(
-            "browser-sidebar-split",
-            t,
-            move |s: &mut Workspace| s.browser_mut(tab).map(|b| &mut b.sidebar_split),
-        ))
-        .child(
-            col()
-                .grow(1.0)
-                .min_h(0.0)
-                .child(saved::view(s, b, t, cx, layer)),
-        );
+        .child(tree::view(s, b, t, cx, layer));
     let main = match b.main {
         Main::Table => table::view(s, b, t, cx, layer),
         Main::Console => console::view(s, b, t, cx, layer),
@@ -713,15 +659,14 @@ mod tests {
     use super::{Pane, cycle_pane, running_status};
 
     #[test]
-    fn focus_cycles_tree_saved_main() {
-        assert_eq!(cycle_pane(Some(Pane::Tree), true), Pane::Saved);
-        assert_eq!(cycle_pane(Some(Pane::Saved), true), Pane::Main);
+    fn focus_cycles_tree_main() {
+        assert_eq!(cycle_pane(Some(Pane::Tree), true), Pane::Main);
         assert_eq!(cycle_pane(Some(Pane::Main), true), Pane::Tree);
         assert_eq!(cycle_pane(Some(Pane::Tree), false), Pane::Main);
-        assert_eq!(cycle_pane(Some(Pane::Main), false), Pane::Saved);
+        assert_eq!(cycle_pane(Some(Pane::Main), false), Pane::Tree);
         assert_eq!(
             cycle_pane(None, true),
-            Pane::Saved,
+            Pane::Main,
             "outside the cycle counts as the tree"
         );
         assert_eq!(cycle_pane(None, false), Pane::Main);

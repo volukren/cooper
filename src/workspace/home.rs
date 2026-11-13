@@ -558,7 +558,7 @@ pub fn delete_dialog(_s: &Workspace, name: &str, t: &Theme, layer: &mut Vec<El>)
                         .color(t.foreground),
                 )
                 .child(ui::label(
-                    "Its saved password and queries will be removed too.",
+                    "Its saved password will be removed too.",
                     t.text_sm,
                     t.muted,
                 )),

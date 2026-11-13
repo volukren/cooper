@@ -5,7 +5,6 @@ use rune::PointerPress;
 use crate::{
     connection::{self, Connection, Store},
     db,
-    queries::QueryStore,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,10 +75,6 @@ impl Home {
         let connections = self.store.load().map_err(|err| format!("{err:#}"))?;
         self.set_connections(connections);
         Ok(())
-    }
-
-    pub fn queries(&self) -> QueryStore {
-        self.store.queries()
     }
 
     pub fn selected_position(&self) -> Option<usize> {
@@ -243,13 +238,8 @@ impl Home {
                 original.name
             ));
         }
-        if renamed {
-            if let Err(err) = self.queries().rename_connection(&original.name, &conn.name) {
-                status.push_str(&format!(" (could not move its saved queries: {err})"));
-            }
-            if let Some(draft) = self.drafts.remove(&original.name) {
-                self.drafts.insert(conn.name.clone(), draft);
-            }
+        if renamed && let Some(draft) = self.drafts.remove(&original.name) {
+            self.drafts.insert(conn.name.clone(), draft);
         }
         self.connections[index] = conn;
         Ok((index, status))
@@ -270,9 +260,6 @@ impl Home {
         let mut status = format!("Connection \"{name}\" deleted");
         if had_keychain && let Err(err) = connection::delete_password(name) {
             status.push_str(&format!(", but its keychain password was not: {err}"));
-        }
-        if let Err(err) = self.queries().remove_connection(name) {
-            status.push_str(&format!(", but its saved queries were not: {err}"));
         }
         self.error = None;
         self.status = Some(status);
@@ -370,10 +357,7 @@ mod tests {
         Focus, Home, Original, StatusKind, active_after_close, cycle_tab, tab_at_position,
         tab_shortcut, tab_title,
     };
-    use crate::{
-        connection::{Connection, DbKind, PasswordStorage, Store},
-        queries::SavedQuery,
-    };
+    use crate::connection::{Connection, DbKind, PasswordStorage, Store};
 
     fn home_from(dir: &Path, toml: &str) -> Home {
         let config = dir.join("connections.toml");
@@ -546,18 +530,12 @@ mod tests {
     }
 
     #[test]
-    fn saved_queries_and_drafts_follow_a_renamed_connection() {
+    fn drafts_follow_a_renamed_connection() {
         let dir = tempfile::tempdir().unwrap();
         let mut home = home_from(
             dir.path(),
             "[[connection]]\nname = \"local\"\nkind = \"sqlite\"\ndatabase = \"1.db\"\n",
         );
-        let queries = home.queries();
-        let query = SavedQuery {
-            name: "all".into(),
-            sql: "SELECT 1;".into(),
-        };
-        queries.save("local", &query).unwrap();
         home.remember_draft("local", "draft".into());
 
         let original = Original {
@@ -568,8 +546,6 @@ mod tests {
             .save_edit(&original, sqlite("renamed", "1.db"), "")
             .unwrap();
         assert_eq!(status, "Connection \"renamed\" updated");
-        assert!(queries.load("local").unwrap().is_empty());
-        assert_eq!(queries.load("renamed").unwrap(), [query]);
         assert_eq!(
             home.drafts.get("renamed").map(String::as_str),
             Some("draft")
@@ -577,7 +553,6 @@ mod tests {
         assert!(!home.drafts.contains_key("local"));
 
         home.delete_connection("renamed");
-        assert!(queries.load("renamed").unwrap().is_empty());
         assert!(home.drafts.is_empty());
     }
 

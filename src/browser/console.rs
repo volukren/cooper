@@ -17,8 +17,7 @@ use rune::{
     col, row, text, text::advance, text_input,
 };
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Dialog as KitDialog, IconButton, IconButtonVariant,
-    TextInput, search::Fold,
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, TextInput, search::Fold,
 };
 use unicode_width::UnicodeWidthStr as _;
 
@@ -29,11 +28,9 @@ use self::{
 use super::{Browser, Main, Pane};
 use crate::{
     connection::DbKind,
-    db::{self, ScriptResult},
-    dialog::Dialog,
+    db::ScriptResult,
     icons,
     keys::{self, Command, Ctx},
-    queries::{QueryStore, SavedQuery},
     theme::Theme,
     ui::{self, Scroll, ScrollY, Split},
     workspace::{self, TabId, Workspace},
@@ -59,14 +56,7 @@ pub const FIND: &str = "console-find";
 const FIND_MATCH: &str = "console-find-match";
 const FIND_CONTROLS: [&str; 3] = ["find-prev", "find-next", "find-close"];
 const ERROR_TEXT: &str = "script-error-text";
-const TOOLBAR: [&str; 6] = [
-    "console",
-    "run-script",
-    "cancel-script",
-    "save-query",
-    "save-query-as",
-    "new-query",
-];
+const TOOLBAR: [&str; 3] = ["console", "run-script", "cancel-script"];
 const RESULT_CONTROLS: [&str; 5] = [
     "record-prev",
     "record-next",
@@ -113,40 +103,6 @@ pub enum Outcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SaveNote {
-    Required,
-    Exists(String),
-    Failed(String),
-}
-
-impl SaveNote {
-    pub fn text(&self) -> String {
-        match self {
-            Self::Required => "A query name is required".to_string(),
-            Self::Exists(name) => {
-                format!(
-                    "\"{}\" already exists · Enter overwrites it",
-                    db::render_text(name)
-                )
-            }
-            Self::Failed(message) => message.clone(),
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct SavePrompt {
-    pub overwrite: bool,
-    pub note: Option<SaveNote>,
-}
-
-#[derive(Clone, Debug)]
-pub enum Alert {
-    Discard,
-    Replace { query: SavedQuery, run: bool },
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EditorView {
     pub top: f32,
@@ -158,18 +114,12 @@ pub struct EditorView {
 }
 
 pub struct Console {
-    pub connection: String,
-    pub queries: QueryStore,
     pub sql: TextEdit,
-    pub saved: Option<SavedQuery>,
     pub run: Option<Run>,
     pub outcome: Option<Outcome>,
     pub grid: Grid,
     pub record: Option<usize>,
     pub record_scroll: ScrollY,
-    pub name: TextEdit,
-    pub prompt: SavePrompt,
-    pub alert: Option<Alert>,
     pub status_shown: bool,
     pub in_result: bool,
     pub split: Split,
@@ -182,22 +132,16 @@ pub struct Console {
 }
 
 impl Console {
-    pub fn new(connection: &str, queries: QueryStore, draft: Option<String>) -> Self {
+    pub fn new(draft: Option<String>) -> Self {
         let mut sql = TextEdit::new(normalize(&draft.unwrap_or_default()));
         sql.set_caret(sql.text.len());
         Self {
-            connection: connection.to_string(),
-            queries,
             sql,
-            saved: None,
             run: None,
             outcome: None,
             grid: Grid::default(),
             record: None,
             record_scroll: ScrollY::default(),
-            name: TextEdit::new(""),
-            prompt: SavePrompt::default(),
-            alert: None,
             status_shown: false,
             in_result: false,
             split: Split::new(240.0, 90.0, 4000.0),
@@ -222,32 +166,8 @@ impl Console {
         self.run.is_some()
     }
 
-    pub fn unsaved(&self) -> bool {
-        unsaved(&self.sql.text, self.saved.as_ref())
-    }
-
-    pub fn bound(&self) -> Option<(String, bool)> {
-        let query = self.saved.as_ref()?;
-        Some((query.name.clone(), self.unsaved()))
-    }
-
-    pub fn saved_name(&self) -> Option<&str> {
-        self.saved.as_ref().map(|query| query.name.as_str())
-    }
-
     pub fn title_context(&self) -> String {
-        match self.bound() {
-            Some((name, unsaved)) => format!("{name}{}", if unsaved { "*" } else { "" }),
-            None => "Console".to_string(),
-        }
-    }
-
-    pub fn title_text(&self) -> String {
-        let mark = if self.unsaved() { "*" } else { "" };
-        match &self.saved {
-            Some(query) => format!("· {}{mark}", db::render_text(&query.name)),
-            None => format!("· new{mark}"),
-        }
+        "Console".to_string()
     }
 
     pub fn running_status(&self) -> Option<String> {
@@ -311,13 +231,6 @@ impl Console {
             None if hits.len() == 1 => "1 match".to_string(),
             None => format!("{total} matches"),
         })
-    }
-
-    pub(crate) fn set_text(&mut self, text: &str) {
-        let focused = self.sql.focused;
-        self.sql.replace_text(text);
-        self.sql.set_caret(self.sql.text.len());
-        self.sql.focused = focused;
     }
 }
 
@@ -509,21 +422,6 @@ pub fn contexts(b: &Browser, focused: Option<&str>, out: &mut Vec<Ctx>) {
 
 pub fn run(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
     use Command::*;
-    match cmd {
-        SaveQuery => {
-            save(s, tab, tx);
-            return true;
-        }
-        SaveQueryAs => {
-            open_save_dialog(s, tab);
-            return true;
-        }
-        NewQuery => {
-            new_query(s, tab, tx);
-            return true;
-        }
-        _ => {}
-    }
     let Some(b) = s.browser_mut(tab) else {
         return false;
     };
@@ -1111,195 +1009,8 @@ fn editor_changed(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
     let Some(b) = s.browser_mut(tab) else {
         return;
     };
-    if is_blank(&b.console.sql.text) {
-        b.console.saved = None;
-    }
     clear_status(b);
     s.sync_title(tx);
-}
-
-fn save(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
-    save_now(s, tab);
-    reveal_saved(s, tab, tx);
-    s.sync_title(tx);
-}
-
-fn reveal_saved(s: &Workspace, tab: TabId, tx: &mut Tx) {
-    if let Some(b) = s.browser(tab) {
-        super::saved::reveal(b, tx);
-    }
-}
-
-fn save_now(s: &mut Workspace, tab: TabId) {
-    let Some(b) = s.browser_mut(tab) else {
-        return;
-    };
-    if is_blank(&b.console.sql.text) {
-        return hint(b, "Nothing to save: the editor is empty");
-    }
-    match b.console.saved.as_ref().map(|query| query.name.clone()) {
-        Some(name) => {
-            if let Err(err) = write_query(b, name) {
-                fail(b, format!("Failed to save: {err}"));
-            }
-        }
-        None => open_save_dialog(s, tab),
-    }
-}
-
-fn pressed(s: &mut Workspace, tab: TabId) {
-    if let Some(b) = s.browser_mut(tab) {
-        b.clear_status();
-    }
-}
-
-fn open_save_dialog(s: &mut Workspace, tab: TabId) {
-    let Some(b) = s.browser_mut(tab) else {
-        return;
-    };
-    if is_blank(&b.console.sql.text) {
-        return hint(b, "Nothing to save: the editor is empty");
-    }
-    let c = &mut b.console;
-    let name = c
-        .saved
-        .as_ref()
-        .map_or(String::new(), |query| query.name.clone());
-    c.prompt = SavePrompt::default();
-    c.name = TextEdit::new(name);
-    c.name.set_selection(0, c.name.text.len());
-    c.name.focused = true;
-    s.dialog = Some(Dialog::SaveQuery(tab));
-}
-
-fn submit_save(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
-    try_save(s, tab);
-    reveal_saved(s, tab, tx);
-    s.sync_title(tx);
-}
-
-fn try_save(s: &mut Workspace, tab: TabId) {
-    let Some(b) = s.browser_mut(tab) else {
-        return;
-    };
-    let c = &mut b.console;
-    let name = c.name.text.trim().to_string();
-    let bound = c.saved.as_ref().map(|query| query.name.clone());
-    let (connection, queries) = (&c.connection, &c.queries);
-    if let Err(note) = vet_save(&name, bound.as_deref(), c.prompt.overwrite, || {
-        queries.load(connection)
-    }) {
-        c.prompt = SavePrompt {
-            overwrite: matches!(note, SaveNote::Exists(_)),
-            note: Some(note),
-        };
-        return;
-    }
-    match write_query(b, name) {
-        Ok(()) => {
-            b.console.prompt = SavePrompt::default();
-            s.dialog = None;
-        }
-        Err(err) => {
-            b.console.prompt = SavePrompt {
-                overwrite: false,
-                note: Some(SaveNote::Failed(format!("Failed to save: {err}"))),
-            };
-        }
-    }
-}
-
-fn write_query(b: &mut Browser, name: String) -> color_eyre::Result<()> {
-    let query = SavedQuery {
-        name,
-        sql: script(&b.console.sql.text).to_string(),
-    };
-    b.console.queries.save(&b.console.connection, &query)?;
-    hint(
-        b,
-        format!("Query \"{}\" saved", db::render_text(&query.name)),
-    );
-    let name = query.name.clone();
-    b.console.saved = Some(query);
-    super::saved::reload(b);
-    b.saved.select(&name);
-    Ok(())
-}
-
-fn new_query(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
-    let Some(b) = s.browser_mut(tab) else {
-        return;
-    };
-    if !b.console.unsaved() {
-        return clear_script(b, tx);
-    }
-    b.console.alert = Some(Alert::Discard);
-    s.dialog = Some(Dialog::ConsoleAlert(tab));
-}
-
-fn clear_script(b: &mut Browser, tx: &mut Tx) {
-    b.console.set_text("");
-    b.console.saved = None;
-    focus(b, tx);
-}
-
-pub fn load_query(s: &mut Workspace, tab: TabId, query: SavedQuery, run: bool, tx: &mut Tx) {
-    let Some(b) = s.browser_mut(tab) else {
-        return;
-    };
-    if !b.console.unsaved() {
-        return replace_with(b, query, run, tx);
-    }
-    b.console.alert = Some(Alert::Replace { query, run });
-    s.dialog = Some(Dialog::ConsoleAlert(tab));
-}
-
-fn replace_with(b: &mut Browser, query: SavedQuery, run: bool, tx: &mut Tx) {
-    let text = normalize(&query.sql);
-    b.console.set_text(&text);
-    b.console.saved = Some(SavedQuery {
-        name: query.name,
-        sql: script(&text).to_string(),
-    });
-    focus(b, tx);
-    b.set_main(Main::Console);
-    if run {
-        run_script(b, tx);
-    }
-}
-
-fn confirm_alert(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
-    if matches!(&s.dialog, Some(Dialog::ConsoleAlert(open)) if *open == tab) {
-        s.dialog = None;
-    }
-    let Some(b) = s.browser_mut(tab) else {
-        return;
-    };
-    match b.console.alert.take() {
-        Some(Alert::Discard) => clear_script(b, tx),
-        Some(Alert::Replace { query, run }) => replace_with(b, query, run, tx),
-        None => {}
-    }
-    s.sync_title(tx);
-}
-
-fn cancel_alert(s: &mut Workspace, tab: TabId) {
-    if matches!(&s.dialog, Some(Dialog::ConsoleAlert(open)) if *open == tab) {
-        s.dialog = None;
-    }
-    if let Some(b) = s.browser_mut(tab) {
-        b.console.alert = None;
-    }
-}
-
-pub fn forget_query(b: &mut Browser, name: &str) {
-    if b.console
-        .saved
-        .as_ref()
-        .is_some_and(|query| query.name == name)
-    {
-        b.console.saved = None;
-    }
 }
 
 fn small_button(label: &str, variant: ButtonVariant) -> Button {
@@ -1361,24 +1072,12 @@ pub fn view(
 
 fn editor_pane(b: &Browser, tab: TabId, t: &Theme) -> El {
     let c = &b.console;
-    let title = row()
-        .gap(4.)
-        .min_w(0.)
-        .center_y()
-        .child(ui::label("SQL", t.bold(t.text_sm), t.blue))
-        .child({
-            let style = if c.saved.is_none() {
-                t.text_sm.italic()
-            } else {
-                t.text_sm
-            };
-            text(c.title_text())
-                .font(style)
-                .color(t.muted)
-                .truncate()
-                .min_w(0.)
-                .key("console-title")
-        });
+    let title =
+        row()
+            .gap(4.)
+            .min_w(0.)
+            .center_y()
+            .child(ui::label("SQL", t.bold(t.text_sm), t.blue));
     let mut toolbar = row()
         .gap(4.)
         .center_y()
@@ -1426,43 +1125,6 @@ fn editor_pane(b: &Browser, tab: TabId, t: &Theme) -> El {
             );
         }
     }
-    let toolbar = toolbar
-        .child(
-            small_button("Save", ButtonVariant::Ghost)
-                .icon(&icons::SAVE)
-                .help("Save the query")
-                .shortcut(shortcut(Command::SaveQuery))
-                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                    pressed(s, tab);
-                    save(s, tab, tx);
-                })
-                .build(&t.k)
-                .key("save-query"),
-        )
-        .child(
-            small_button("Save As…", ButtonVariant::Ghost)
-                .help("Save under a new name")
-                .shortcut(shortcut(Command::SaveQueryAs))
-                .on_press(move |s: &mut Workspace| {
-                    pressed(s, tab);
-                    open_save_dialog(s, tab);
-                })
-                .build(&t.k)
-                .key("save-query-as"),
-        )
-        .child(
-            small_button("New", ButtonVariant::Ghost)
-                .icon(&icons::PLUS)
-                .help("Start a new script")
-                .shortcut(shortcut(Command::NewQuery))
-                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                    pressed(s, tab);
-                    new_query(s, tab, tx);
-                    s.sync_title(tx);
-                })
-                .build(&t.k)
-                .key("new-query"),
-        );
     ui::pane("console-editor", title, Some(toolbar), editor(b, tab, t), t)
 }
 
@@ -1851,139 +1513,6 @@ fn result_body(b: &Browser, tab: TabId, t: &Theme) -> El {
     }
 }
 
-pub fn save_dialog(
-    s: &Workspace,
-    tab: TabId,
-    t: &Theme,
-    _cx: &mut Cx<Workspace>,
-    layer: &mut Vec<El>,
-) {
-    let Some(b) = s.browser(tab) else {
-        return;
-    };
-    let c = &b.console;
-    let overwrite = c.prompt.overwrite;
-    let note_color = match &c.prompt.note {
-        Some(SaveNote::Exists(_)) => t.warning,
-        _ => t.danger,
-    };
-    let input = TextInput::new(&c.name)
-        .placeholder("Query name")
-        .label("Name")
-        .width(None)
-        .on_edit(move |s: &mut Workspace| workspace::browser_edit(s, tab, |b| &mut b.console.name))
-        .on_change(move |s: &mut Workspace, _tx: &mut Tx| {
-            if let Some(b) = s.browser_mut(tab) {
-                b.console.prompt = SavePrompt::default();
-            }
-        })
-        .on_submit(move |s: &mut Workspace, tx: &mut Tx| submit_save(s, tab, tx))
-        .on_key(|s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| keys::field_key(s, ev, tx))
-        .build(&t.k)
-        .key("save-query-name");
-    let form = col()
-        .px(16.)
-        .pb(4.)
-        .gap(6.)
-        .child(ui::label("Name", t.medium(t.text_sm), t.foreground))
-        .child(input)
-        .children(c.prompt.note.as_ref().map(|note| {
-            text(note.text())
-                .font(t.text_xs)
-                .color(note_color)
-                .wrap()
-                .key("save-query-note")
-        }));
-    let footer = row()
-        .w_full()
-        .padding(16.)
-        .gap(8.)
-        .justify_end()
-        .child(
-            Button::new("Cancel")
-                .variant(ButtonVariant::Outline)
-                .on_press(|s: &mut Workspace| s.dialog = None)
-                .build(&t.k)
-                .key("save-query-cancel"),
-        )
-        .child(
-            Button::new(if overwrite { "Overwrite" } else { "Save" })
-                .icon(&icons::CHECK)
-                .variant(if overwrite {
-                    ButtonVariant::Danger
-                } else {
-                    ButtonVariant::Submit
-                })
-                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| submit_save(s, tab, tx))
-                .build(&t.k)
-                .key("save-query-confirm"),
-        );
-    KitDialog::new("save-query", "Save query")
-        .width(440.)
-        .fit()
-        .open(true)
-        .on_close(|s: &mut Workspace| s.dialog = None)
-        .child(form)
-        .child(footer)
-        .build(&t.modal, layer);
-}
-
-pub fn alert_dialog(
-    s: &Workspace,
-    tab: TabId,
-    t: &Theme,
-    _cx: &mut Cx<Workspace>,
-    layer: &mut Vec<El>,
-) {
-    let Some(alert) = s.browser(tab).and_then(|b| b.console.alert.as_ref()) else {
-        return;
-    };
-    let (title, description, ok) = match alert {
-        Alert::Discard => (
-            "Discard the unsaved script?",
-            "The editor has an unsaved script. Starting a new one discards it.".to_string(),
-            "Discard",
-        ),
-        Alert::Replace { query, .. } => (
-            "Replace the unsaved script?",
-            format!(
-                "The editor has an unsaved script. Replace it with \"{}\"?",
-                db::render_text(&query.name)
-            ),
-            "Replace",
-        ),
-    };
-    let footer = row()
-        .w_full()
-        .padding(16.)
-        .gap(8.)
-        .justify_end()
-        .child(
-            Button::new("Cancel")
-                .variant(ButtonVariant::Outline)
-                .on_press(move |s: &mut Workspace| cancel_alert(s, tab))
-                .build(&t.k)
-                .key("console-alert-cancel"),
-        )
-        .child(
-            Button::new(ok)
-                .variant(ButtonVariant::Danger)
-                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| confirm_alert(s, tab, tx))
-                .build(&t.k)
-                .key("console-alert-confirm")
-                .default_button()
-                .autofocus(),
-        );
-    KitDialog::new("console-alert", title)
-        .description(description)
-        .width(440.)
-        .fit()
-        .open(true)
-        .on_close(move |s: &mut Workspace| cancel_alert(s, tab))
-        .child(footer)
-        .build(&t.modal, layer);
-}
-
 fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -2003,14 +1532,6 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
-fn script(text: &str) -> &str {
-    text.trim_end()
-}
-
-fn unsaved(text: &str, saved: Option<&SavedQuery>) -> bool {
-    !is_blank(text) && saved.is_none_or(|query| query.sql != script(text))
-}
-
 fn runnable(text: &str, selection: &str) -> Option<String> {
     let sql = if is_blank(selection) { text } else { selection };
     (!is_blank(sql)).then(|| sql.to_string())
@@ -2021,29 +1542,6 @@ fn ticker(seconds: u64, cancelling: bool) -> String {
         "cancelling…".to_string()
     } else {
         format!("running… {}s", ui::group(seconds))
-    }
-}
-
-fn vet_save(
-    name: &str,
-    bound: Option<&str>,
-    overwrite: bool,
-    load: impl FnOnce() -> color_eyre::Result<Vec<SavedQuery>>,
-) -> Result<(), SaveNote> {
-    if name.is_empty() {
-        return Err(SaveNote::Required);
-    }
-    if bound == Some(name) || overwrite {
-        return Ok(());
-    }
-    match load() {
-        Ok(saved) if saved.iter().any(|query| query.name == name) => {
-            Err(SaveNote::Exists(name.to_string()))
-        }
-        Ok(_) => Ok(()),
-        Err(err) => Err(SaveNote::Failed(format!(
-            "Failed to read saved queries: {err}"
-        ))),
     }
 }
 
@@ -2061,18 +1559,7 @@ fn copied_message(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SaveNote, copied_message, is_blank, normalize, runnable, script, ticker, unsaved, vet_save,
-    };
-    use crate::queries::SavedQuery;
-    use color_eyre::eyre::eyre;
-
-    fn query(name: &str, sql: &str) -> SavedQuery {
-        SavedQuery {
-            name: name.to_string(),
-            sql: sql.to_string(),
-        }
-    }
+    use super::{copied_message, normalize, runnable, ticker};
 
     #[test]
     fn pasted_text_is_normalized() {
@@ -2082,25 +1569,6 @@ mod tests {
         );
         assert_eq!(normalize("a\u{2028}b\u{2029}c"), "a\nb\nc");
         assert_eq!(normalize("ю😀é"), "ю😀é");
-    }
-
-    #[test]
-    fn unsaved_ignores_trailing_whitespace_and_blank_editors() {
-        assert!(!unsaved("", None), "a blank editor is never unsaved");
-        assert!(!unsaved("  \n\t\n", None));
-        assert!(unsaved("select 1", None));
-        let first = query("first", "select 1;");
-        assert!(!unsaved("select 1;\n", Some(&first)));
-        assert!(!unsaved("select 1;  \n\n", Some(&first)));
-        assert!(unsaved("select 2;", Some(&first)));
-        assert!(
-            unsaved(" select 1;", Some(&first)),
-            "leading whitespace counts"
-        );
-        assert!(!unsaved("", Some(&first)));
-        assert_eq!(script("select 1;\n"), "select 1;");
-        assert!(is_blank(" \n "));
-        assert!(!is_blank(" x "));
     }
 
     #[test]
@@ -2133,42 +1601,6 @@ mod tests {
         assert_eq!(ticker(75, false), "running… 75s");
         assert_eq!(ticker(3600, false), "running… 3,600s");
         assert_eq!(ticker(5, true), "cancelling…");
-    }
-
-    #[test]
-    fn saving_asks_before_overwriting_another_query() {
-        let saved = || Ok(vec![query("a", "select 1"), query("b", "select 2")]);
-        assert_eq!(vet_save("", None, false, saved), Err(SaveNote::Required));
-        assert_eq!(vet_save("new", None, false, saved), Ok(()));
-        assert_eq!(
-            vet_save("a", None, false, saved),
-            Err(SaveNote::Exists("a".to_string()))
-        );
-        assert_eq!(
-            vet_save("a", None, true, saved),
-            Ok(()),
-            "the second submit overwrites"
-        );
-        assert_eq!(
-            vet_save("a", Some("a"), false, saved),
-            Ok(()),
-            "the bound name needs no question"
-        );
-        assert_eq!(
-            vet_save("b", Some("a"), false, saved),
-            Err(SaveNote::Exists("b".to_string()))
-        );
-        assert_eq!(
-            vet_save("x", None, false, || Err(eyre!("broken file"))),
-            Err(SaveNote::Failed(
-                "Failed to read saved queries: broken file".to_string()
-            ))
-        );
-        assert_eq!(
-            SaveNote::Exists("a".to_string()).text(),
-            "\"a\" already exists · Enter overwrites it"
-        );
-        assert_eq!(SaveNote::Required.text(), "A query name is required");
     }
 
     #[test]
