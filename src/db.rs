@@ -1042,7 +1042,7 @@ fn select_sql(
     Ok(sql)
 }
 
-fn update_sql(
+pub(crate) fn update_sql(
     kind: DbKind,
     update: &RowUpdate,
     mut value: impl FnMut(Option<&str>) -> String,

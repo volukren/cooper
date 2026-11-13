@@ -12,10 +12,14 @@ use rune::{
 };
 use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant};
 
-use super::Browser;
+use super::{
+    Browser,
+    confirm::{Confirm, Pending},
+};
 use crate::{
-    db::{self, Page, TableDdl, TableKind},
-    icons,
+    db::{self, Page, RowUpdate, TableDdl, TableKind},
+    dialog::Dialog,
+    guard, icons,
     keys::{self, Command, Ctx},
     theme::Theme,
     ui::{self, Scroll, ScrollY},
@@ -531,19 +535,63 @@ pub fn set_null(b: &mut Browser, index: usize, null: bool) {
     }
 }
 
-fn save_draft(b: &mut Browser) {
+/// Saves the row being edited. On a connection tagged Production it opens the confirmation
+/// prompt instead.
+fn save_draft(s: &mut Workspace, tab: TabId) {
+    let Some((b, dialog)) = s.browser_and_dialog(tab) else {
+        return;
+    };
     let Some(draft) = b.table.draft.as_mut().filter(|draft| !draft.saving) else {
         return;
     };
-    match draft.update() {
-        Some(update) => {
-            let id = b.session.update_row(update);
-            b.table.save_request = Some((id, draft.target().row_label.clone()));
-            draft.saving = true;
-            draft.error = None;
-        }
-        None => draft.error = Some("Nothing changed".to_string()),
+    let Some(update) = draft.update() else {
+        draft.error = Some("Nothing changed".to_string());
+        return;
+    };
+    if b.connection.asks_to_confirm() {
+        let statement = match guard::row_update(b.connection.kind, &update) {
+            Ok(statement) => statement,
+            Err(err) => {
+                draft.error = Some(format!("Not saved: {err}"));
+                return;
+            }
+        };
+        *dialog = Some(Dialog::Confirm(Box::new(Confirm {
+            tab,
+            connection: b.connection.name.clone(),
+            statements: vec![statement],
+            pending: Pending::Row {
+                row: draft.target().row_label.clone(),
+                update,
+            },
+        })));
+        return;
     }
+    send_update(b, update);
+}
+
+/// Saves `update` as it was confirmed, if the same edit is still waiting to be saved.
+pub(super) fn save_confirmed(b: &mut Browser, update: RowUpdate) {
+    let current = b
+        .table
+        .draft
+        .as_ref()
+        .filter(|draft| !draft.saving)
+        .and_then(|draft| draft.update());
+    if current.as_ref() != Some(&update) {
+        return status(b, "Not saved: the row is no longer being edited", true);
+    }
+    send_update(b, update);
+}
+
+fn send_update(b: &mut Browser, update: RowUpdate) {
+    let Some(draft) = b.table.draft.as_mut() else {
+        return;
+    };
+    let id = b.session.update_row(update);
+    b.table.save_request = Some((id, draft.target().row_label.clone()));
+    draft.saving = true;
+    draft.error = None;
 }
 
 fn step_field(b: &mut Browser, forward: bool, tx: &mut Tx) {
@@ -710,7 +758,7 @@ pub fn run(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
             if b.table.draft.is_none() {
                 return false;
             }
-            save_draft(b);
+            save_draft(s, tab);
         }
         CancelEdit => end_edit(b, tx),
         NextField => step_field(b, true, tx),
@@ -1287,7 +1335,12 @@ fn save_bar(tab: TabId, draft: &Draft, t: &Theme) -> El {
                         .disabled(changes == 0 || draft.saving)
                         .help("Save the changes")
                         .shortcut(keys::label(Command::SaveRow).unwrap_or_default())
-                        .on_press_tx(with_browser(tab, |b, _tx| save_draft(b)))
+                        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                            if let Some(b) = s.browser_mut(tab) {
+                                note_press(b, tx);
+                            }
+                            save_draft(s, tab);
+                        })
                         .build(&t.k)
                         .focusable(false)
                         .no_focus_ring()

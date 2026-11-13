@@ -278,6 +278,10 @@ fn connection_row(s: &Workspace, index: usize, t: &Theme) -> El {
             .grow(1.0)
             .min_w(0.0),
     )
+    .children(
+        conn.tag
+            .map(|tag| ui::tag_badge(tag, t).key(format!("connection-{index}-tag"))),
+    )
     .children(open.then(|| {
         rune::el()
             .key("open-dot")
@@ -358,11 +362,21 @@ fn details(s: &Workspace, t: &Theme) -> El {
                         .min_w(0.0)
                         .shrink()
                         .child(
-                            text(db::render_text(&conn.name))
-                                .key("details-name")
-                                .font(t.bold(TextStyle::new(18.0, 700.0).lh(24.0)))
-                                .color(t.foreground)
-                                .truncate(),
+                            row()
+                                .gap(8.0)
+                                .center_y()
+                                .min_w(0.0)
+                                .child(
+                                    text(db::render_text(&conn.name))
+                                        .key("details-name")
+                                        .font(t.bold(TextStyle::new(18.0, 700.0).lh(24.0)))
+                                        .color(t.foreground)
+                                        .truncate()
+                                        .shrink(),
+                                )
+                                .children(
+                                    conn.tag.map(|tag| ui::tag_badge(tag, t).key("details-tag")),
+                                ),
                         )
                         .child(ui::label(conn.kind.label(), t.text_sm, t.muted)),
                 ),

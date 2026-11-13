@@ -3,6 +3,7 @@ mod connection;
 mod db;
 mod dialog;
 mod form;
+mod guard;
 mod help;
 mod highlight;
 mod icons;

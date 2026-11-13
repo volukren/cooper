@@ -3,7 +3,7 @@ use std::{path::Path, rc::Rc};
 use super::{Focus, TabState, Workspace};
 use crate::{
     browser::Browser,
-    connection::{Connection, DbKind, PasswordStorage, Store},
+    connection::{Connection, DbKind, PasswordStorage, Store, Tag},
     dialog::Dialog,
     form::{ConnectionForm, FormValues},
     keys::Command,
@@ -144,6 +144,7 @@ fn postgres_plain(name: &str) -> Connection {
     Connection {
         name: name.into(),
         kind: DbKind::Postgres,
+        tag: None,
         host: "db.invalid".into(),
         port: Some(5432),
         user: "app".into(),
@@ -858,6 +859,57 @@ fn the_type_dropdown_switches_fields_and_ports() {
     ws.press("escape");
     wait_dialog_closed(&mut ws);
     assert!(config.connections_toml().is_empty(), "nothing saved");
+}
+
+#[test]
+fn the_environment_tag_is_saved_shown_and_cleared() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let path = config.dir().join("data").join("shop.db");
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-n");
+    ws.type_text("live shop");
+    set_kind(&mut ws, DbKind::Sqlite);
+    set_text(&mut ws, "database", &path.to_string_lossy());
+    assert!(!ws.exists("form-tag-hint"));
+
+    ws.click("form-tag-trigger");
+    assert!(ws.read(|w| form_of(w).tag_open), "the menu opens");
+    ws.click_in("form-tag-content", "Production");
+    assert_eq!(values(&ws).tag, Some(Tag::Prod));
+    assert!(
+        ws.read(|w| !form_of(w).tag_open),
+        "choosing closes the menu"
+    );
+    assert!(ws.exists("form-tag-hint"));
+
+    focus_field(&mut ws, "name");
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    assert!(
+        config.connections_toml().contains("tag = \"prod\""),
+        "{}",
+        config.connections_toml()
+    );
+    assert_eq!(selected(&ws).as_deref(), Some("live shop"));
+    assert!(ws.exists("connection-1-tag"));
+    assert!(!ws.exists("connection-0-tag"), "shop has no tag");
+    assert!(ws.exists("details-tag"));
+    assert_eq!(
+        ws.find("connection-1-tag").and_then(|e| e.label).as_deref(),
+        Some("Production")
+    );
+
+    ws.press("cmd-e");
+    assert_eq!(values(&ws).tag, Some(Tag::Prod));
+    ws.update(|w, _| form_mut(w).set_tag(None));
+    assert!(!ws.exists("form-tag-hint"));
+    focus_field(&mut ws, "name");
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    let toml = config.connections_toml();
+    assert!(!toml.lines().any(|line| line.starts_with("tag")), "{toml}");
+    assert!(!ws.exists("connection-1-tag"));
+    assert!(!ws.exists("details-tag"));
 }
 
 #[test]

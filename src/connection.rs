@@ -77,10 +77,49 @@ impl PasswordStorage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tag {
+    #[serde(alias = "development")]
+    Dev,
+    #[serde(alias = "testing")]
+    Test,
+    #[serde(alias = "stage")]
+    Staging,
+    #[serde(alias = "production")]
+    Prod,
+}
+
+impl Tag {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tag::Dev => "Development",
+            Tag::Test => "Testing",
+            Tag::Staging => "Staging",
+            Tag::Prod => "Production",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            Tag::Dev => "DEV",
+            Tag::Test => "TEST",
+            Tag::Staging => "STAGING",
+            Tag::Prod => "PROD",
+        }
+    }
+
+    pub fn asks_to_confirm(self) -> bool {
+        self == Tag::Prod
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub name: String,
     pub kind: DbKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Tag>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +140,7 @@ impl fmt::Debug for Connection {
         f.debug_struct("Connection")
             .field("name", &self.name)
             .field("kind", &self.kind)
+            .field("tag", &self.tag)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &self.user)
@@ -112,6 +152,10 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    pub fn asks_to_confirm(&self) -> bool {
+        self.tag.is_some_and(Tag::asks_to_confirm)
+    }
+
     pub fn uses_keychain(&self) -> bool {
         !self.kind.is_file_based() && self.password_storage == PasswordStorage::Keychain
     }
@@ -139,9 +183,10 @@ struct ConnectionsFile {
 }
 
 const CONNECTIONS_KEY: &str = "connection";
-const MANAGED_KEYS: [&str; 8] = [
+const MANAGED_KEYS: [&str; 9] = [
     "name",
     "kind",
+    "tag",
     "host",
     "port",
     "user",
@@ -526,6 +571,7 @@ database = "app"
         let edited = Connection {
             name: "archive".into(),
             kind: DbKind::Sqlite,
+            tag: None,
             host: String::new(),
             port: None,
             user: String::new(),
@@ -566,6 +612,7 @@ database = "app"
         let edited = Connection {
             name: "x".into(),
             kind: DbKind::MySql,
+            tag: None,
             host: "localhost".into(),
             port: Some(3306),
             user: "root".into(),
@@ -602,6 +649,7 @@ password = "s3cret"
         Connection {
             name: "dev".into(),
             kind: DbKind::Postgres,
+            tag: None,
             host: "localhost".into(),
             port: None,
             user: "postgres".into(),
@@ -690,8 +738,98 @@ password = "s3cret"
 
     #[test]
     fn debug_output_hides_the_password() {
-        let text = format!("{:?}", plain_dev());
+        let conn = Connection {
+            tag: Some(Tag::Prod),
+            ..plain_dev()
+        };
+        let text = format!("{conn:?}");
         assert!(!text.contains("s3cret"), "{text}");
         assert!(text.contains("***"), "{text}");
+        assert!(text.contains("Prod"), "{text}");
+    }
+
+    #[test]
+    fn a_tag_is_written_only_when_set() {
+        let t = TempStore::new(None);
+        let prod = Connection {
+            tag: Some(Tag::Prod),
+            ..plain_dev()
+        };
+        t.store.append(&prod).unwrap();
+        let data = t.contents();
+        assert!(data.contains("tag = \"prod\""), "{data}");
+
+        let t = TempStore::new(None);
+        t.store.append(&plain_dev()).unwrap();
+        let data = t.contents();
+        assert!(!data.contains("tag"), "{data}");
+    }
+
+    #[test]
+    fn configs_without_tags_load_untagged() {
+        let t = TempStore::new(Some(TWO));
+        let loaded = t.store.load().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().all(|c| c.tag.is_none()), "{loaded:?}");
+        assert!(!loaded.iter().any(Connection::asks_to_confirm));
+    }
+
+    #[test]
+    fn update_adds_changes_and_removes_the_tag_in_place() {
+        let t = TempStore::new(Some(
+            "# my databases\n\
+             [[connection]]\n\
+             name = \"dev\"\n\
+             kind = \"postgres\"\n\
+             host = \"localhost\"\n\
+             user = \"postgres\"\n\
+             database = \"app\" # main schema\n\
+             password_storage = \"plain\"\n\
+             password = \"s3cret\"\n\
+             color = \"red\"\n",
+        ));
+        let mut conn = Connection {
+            tag: Some(Tag::Prod),
+            ..plain_dev()
+        };
+        t.store.update("dev", &conn).unwrap();
+        let data = t.contents();
+        assert!(data.contains("tag = \"prod\""), "{data}");
+        assert!(data.contains("color = \"red\""), "{data}");
+        assert!(data.contains("database = \"app\" # main schema"), "{data}");
+        assert!(data.starts_with("# my databases\n"), "{data}");
+        assert!(t.store.load().unwrap()[0].asks_to_confirm());
+
+        conn.tag = Some(Tag::Dev);
+        t.store.update("dev", &conn).unwrap();
+        let data = t.contents();
+        assert!(data.contains("tag = \"dev\""), "{data}");
+        assert!(!data.contains("prod"), "{data}");
+        assert!(data.contains("color = \"red\""), "{data}");
+        assert_eq!(t.store.load().unwrap()[0].tag, Some(Tag::Dev));
+
+        conn.tag = None;
+        t.store.update("dev", &conn).unwrap();
+        let data = t.contents();
+        assert!(!data.contains("tag"), "{data}");
+        assert!(data.contains("color = \"red\""), "{data}");
+        assert!(data.contains("database = \"app\" # main schema"), "{data}");
+        assert_eq!(t.store.load().unwrap()[0].tag, None);
+    }
+
+    #[test]
+    fn long_tag_names_are_accepted_and_unknown_ones_fail() {
+        let t = TempStore::new(Some(
+            "[[connection]]\nname = \"x\"\nkind = \"sqlite\"\n\
+             database = \"x.db\"\ntag = \"production\"\n",
+        ));
+        assert_eq!(t.store.load().unwrap()[0].tag, Some(Tag::Prod));
+
+        let t = TempStore::new(Some(
+            "[[connection]]\nname = \"x\"\nkind = \"sqlite\"\n\
+             database = \"x.db\"\ntag = \"qa\"\n",
+        ));
+        let err = t.store.load().unwrap_err();
+        assert!(format!("{err:?}").contains("qa"), "{err:?}");
     }
 }
