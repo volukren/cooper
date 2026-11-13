@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 mod browser;
 mod connection;
 mod db;

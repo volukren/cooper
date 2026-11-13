@@ -260,8 +260,6 @@ pub struct Modal {
     title: Option<El>,
     width: f32,
     body: Vec<El>,
-    footer: Option<El>,
-    click_outside: bool,
 }
 
 impl Modal {
@@ -272,8 +270,6 @@ impl Modal {
             title: None,
             width: 480.0,
             body: Vec::new(),
-            footer: None,
-            click_outside: true,
         }
     }
 
@@ -289,16 +285,6 @@ impl Modal {
 
     pub fn child(mut self, body: El) -> Self {
         self.body.push(body);
-        self
-    }
-
-    pub fn footer(mut self, footer: El) -> Self {
-        self.footer = Some(footer);
-        self
-    }
-
-    pub fn click_outside(mut self, close: bool) -> Self {
-        self.click_outside = close;
         self
     }
 
@@ -330,16 +316,6 @@ impl Modal {
             .gap(12.0)
             .min_h(0.0)
             .children(self.body);
-        let footer = self.footer.map(|footer| {
-            row()
-                .key("modal-footer")
-                .w_full()
-                .px(16.0)
-                .pb(16.0)
-                .gap(8.0)
-                .justify_end()
-                .child(footer)
-        });
         let panel = col()
             .key(format!("{}-dialog", self.key))
             .role("dialog")
@@ -351,8 +327,7 @@ impl Modal {
             .border(1.0, t.modal_border)
             .child(header)
             .child(body)
-            .children(footer)
-            .modal_tx(self.click_outside, dismiss);
+            .modal_tx(true, dismiss);
         let panel = t.k.elevate(panel, &t.k.elevation.overlay);
         layer.push(
             el().key(format!("{}-scrim", self.key))

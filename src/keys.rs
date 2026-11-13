@@ -71,7 +71,6 @@ pub enum Ctx {
 }
 
 pub struct Binding {
-    pub spec: &'static str,
     pub chord: Chord,
     pub ctx: Ctx,
     pub cmd: Command,
@@ -163,7 +162,6 @@ pub static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
     TABLE
         .iter()
         .map(|&(spec, ctx, cmd)| Binding {
-            spec,
             chord: Chord::parse(spec).unwrap_or_else(|err| panic!("binding {spec:?}: {err}")),
             ctx,
             cmd,

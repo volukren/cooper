@@ -334,10 +334,6 @@ pub fn kind_labels() -> [&'static str; 3] {
     KINDS.map(DbKind::label)
 }
 
-pub fn storage_labels() -> [&'static str; 2] {
-    STORAGES.map(storage_label)
-}
-
 fn kind_of(label: &str) -> Option<DbKind> {
     KINDS.into_iter().find(|kind| kind.label() == label)
 }

@@ -66,12 +66,6 @@ pub static CLOSE: Icon = Icon {
     body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>"#,
 };
 
-pub static COLUMNS_3: Icon = Icon {
-    name: "lucide-columns-3",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /><path d="M15 3v18" /></g>"#,
-};
-
 pub static COPY: Icon = Icon {
     name: "lucide-copy",
     view: 24.0,
@@ -120,24 +114,6 @@ pub static FOLDER_OPEN: Icon = Icon {
     body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></g>"#,
 };
 
-pub static KEY: Icon = Icon {
-    name: "lucide-key",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 21 9.6-9.6" /><path d="m7.5 15.5 2.3 2.3a1 1 0 0 1 0 1.4l-2.1 2.1a1 1 0 0 1-1.4 0L4 19" /><circle cx="15.5" cy="7.5" r="5.5" /></g>"#,
-};
-
-pub static LIST_TREE: Icon = Icon {
-    name: "lucide-list-tree",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5h13" /><path d="M13 12h8" /><path d="M13 19h8" /><path d="M3 10a2 2 0 0 0 2 2h3" /><path d="M3 5v12a2 2 0 0 0 2 2h3" /></g>"#,
-};
-
-pub static PENCIL: Icon = Icon {
-    name: "lucide-pencil",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></g>"#,
-};
-
 pub static PLAY: Icon = Icon {
     name: "lucide-play",
     view: 24.0,
@@ -166,18 +142,6 @@ pub static ROWS_3: Icon = Icon {
     name: "lucide-rows-3",
     view: 24.0,
     body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M21 9H3" /><path d="M21 15H3" /></g>"#,
-};
-
-pub static SAVE: Icon = Icon {
-    name: "lucide-save",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" /><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" /><path d="M7 3v4a1 1 0 0 0 1 1h7" /></g>"#,
-};
-
-pub static SCROLL_TEXT: Icon = Icon {
-    name: "lucide-scroll-text",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 12h-5" /><path d="M15 8h-5" /><path d="M19 17V5a2 2 0 0 0-2-2H4" /><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" /></g>"#,
 };
 
 pub static SEARCH: Icon = Icon {
@@ -214,12 +178,6 @@ pub static TRIANGLE_ALERT: Icon = Icon {
     name: "lucide-triangle-alert",
     view: 24.0,
     body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></g>"#,
-};
-
-pub static UNPLUG: Icon = Icon {
-    name: "lucide-unplug",
-    view: 24.0,
-    body: r#"<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m19 5 3-3" /><path d="m2 22 3-3" /><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z" /><path d="M7.5 13.5 10 11" /><path d="M10.5 16.5 13 14" /><path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z" /></g>"#,
 };
 
 pub static INFO: Icon = Icon {

@@ -50,7 +50,3 @@ pub fn run(s: &mut Workspace, cmd: Command, tx: &mut Tx) -> Option<bool> {
         _ => None,
     }
 }
-
-pub fn close(s: &mut Workspace) {
-    s.dialog = None;
-}

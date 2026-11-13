@@ -247,11 +247,6 @@ fn hint(b: &mut Browser, text: impl Into<String>) {
     b.set_status(text, false);
 }
 
-fn fail(b: &mut Browser, text: impl Into<String>) {
-    b.console.status_shown = true;
-    b.set_status(text, true);
-}
-
 fn clear_status(b: &mut Browser) {
     if std::mem::take(&mut b.console.status_shown) {
         b.clear_status();

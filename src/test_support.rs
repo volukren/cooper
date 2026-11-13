@@ -20,8 +20,6 @@ const REAL_STEP: Duration = Duration::from_millis(5);
 const SETTLE_FRAMES: usize = 30;
 pub const WINDOW_SIZE: (f32, f32) = crate::WINDOW_SIZE;
 
-pub const SAMPLE_DBS: [&str; 3] = ["shop", "library", "analytics"];
-
 pub type Rt = Runtime<Workspace>;
 
 pub struct TestConfig {
@@ -249,12 +247,6 @@ impl TestWorkspace {
         self.type_text(text);
     }
 
-    pub fn paste(&mut self, text: &str) {
-        self.clip.set_text(text);
-        self.rt.paste(text.to_string());
-        self.settle();
-    }
-
     pub fn clipboard(&self) -> Option<String> {
         self.clip.text().map(|t| t.to_string())
     }
@@ -288,13 +280,6 @@ impl TestWorkspace {
             .find(|e| e.label.as_deref() == Some(label))
     }
 
-    pub fn all_by_label(&self, label: &str) -> Vec<ElementInfo> {
-        self.elements()
-            .into_iter()
-            .filter(|e| e.label.as_deref() == Some(label))
-            .collect()
-    }
-
     pub fn has_label(&self, label: &str) -> bool {
         self.by_label(label).is_some()
     }
@@ -307,13 +292,6 @@ impl TestWorkspace {
 
     pub fn text_of(&self, key: &str) -> Option<String> {
         self.find(key).and_then(|e| e.text.or(e.label))
-    }
-
-    pub fn texts_within(&self, key: &str) -> Vec<String> {
-        self.descendants(key)
-            .into_iter()
-            .filter_map(|e| e.text)
-            .collect()
     }
 
     pub fn descendants(&self, ancestor: &str) -> Vec<ElementInfo> {
@@ -336,13 +314,6 @@ impl TestWorkspace {
 
     pub fn has_dialog(&self) -> bool {
         self.elements().iter().any(|e| e.role == "dialog")
-    }
-
-    pub fn dialog_label(&self) -> Option<String> {
-        self.elements()
-            .into_iter()
-            .find(|e| e.role == "dialog")
-            .and_then(|e| e.label)
     }
 
     pub fn focused(&self) -> Option<String> {
@@ -439,21 +410,12 @@ impl TestWorkspace {
         self.right_click_at(x, y);
     }
 
-    pub fn right_click_label(&mut self, label: &str) {
-        let (x, y) = self.point_of(self.by_label(label), &format!("labelled {label:?}"));
-        self.right_click_at(x, y);
-    }
-
     pub fn button_click(&mut self, key: &str, button: PointerButton) {
         let (x, y) = self.point_of(self.find(key), &format!("keyed {key:?}"));
         self.rt.pointer_move(x, y);
         self.rt.button_down(x, y, button);
         self.rt.button_up(x, y, button);
         self.settle();
-    }
-
-    pub fn middle_click(&mut self, key: &str) {
-        self.button_click(key, PointerButton::Middle);
     }
 
     pub fn resize(&mut self, size: (f32, f32)) {
@@ -660,17 +622,6 @@ impl TestWorkspace {
         self.console()
             .outcome_text()
             .expect("the script finished with an outcome")
-    }
-
-    pub fn snap(&mut self, name: &str) -> Option<PathBuf> {
-        std::env::var_os("COOPER_SNAP")?;
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("ui-shots");
-        std::fs::create_dir_all(&dir).ok()?;
-        let path = dir.join(format!("{name}.png"));
-        snap_png(&mut self.rt, &path);
-        Some(path)
     }
 }
 
