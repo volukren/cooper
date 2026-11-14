@@ -5,7 +5,7 @@ use rune::{
     text,
 };
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Dialog as KitDialog, IconButton, IconButtonVariant,
+    Button, ButtonVariant, Checkbox, ControlSize, Dialog as KitDialog, IconButton, IconButtonVariant,
     Placement, RadioItem, Select, SelectAppearance, TextInput,
 };
 
@@ -237,7 +237,6 @@ pub struct ConnectionForm {
     pub password: TextEdit,
     pub database: TextEdit,
     pub show_password: bool,
-    pub kind_open: bool,
     pub tag_open: bool,
     pub error: Option<String>,
     pub last_field: Cell<Option<&'static str>>,
@@ -279,7 +278,6 @@ impl ConnectionForm {
             password,
             database: TextEdit::new(values.database.clone()),
             show_password: false,
-            kind_open: false,
             tag_open: false,
             error,
             last_field: Cell::new(Some("name")),
@@ -421,14 +419,6 @@ fn replace_keeping_focus(edit: &mut TextEdit, text: String) {
     edit.replace_text(text);
     edit.set_caret(edit.text.len());
     edit.focused = focused;
-}
-
-pub fn kind_labels() -> [&'static str; 3] {
-    KINDS.map(DbKind::label)
-}
-
-fn kind_of(label: &str) -> Option<DbKind> {
-    KINDS.into_iter().find(|kind| kind.label() == label)
 }
 
 pub fn tag_label(tag: Option<Tag>) -> &'static str {
@@ -625,30 +615,26 @@ pub fn dialog(
     .build(&t.k)
     .key("form-name");
 
-    let kind = Select::new("form-kind", &kind_labels())
-        .appearance(SelectAppearance::Field)
-        .width(ROW_WIDTH - FIELD_GAP - label_width(t))
+    let kind = row()
+        .role("group")
         .label("Type")
-        .current(Some(form.kind.label()))
-        .open(form.kind_open)
-        .placement(Placement::BottomStart)
-        .on_toggle(|s: &mut Workspace| {
-            with_form(s, |f| {
-                f.kind_open = !f.kind_open;
-                f.tag_open = false;
-            })
-        })
-        .on_close(|s: &mut Workspace| with_form(s, |f| f.kind_open = false))
-        .on_choose(|s: &mut Workspace, label: &str, _tx: &mut Tx| {
-            let kind = kind_of(label);
-            with_form(s, |f| {
-                f.kind_open = false;
-                if let Some(kind) = kind {
-                    f.set_kind(kind);
-                }
-            });
-        })
-        .build(&t.k, &mut popups);
+        .focus_group()
+        .w_full()
+        .flex_wrap()
+        .gaps(6.0, 16.0)
+        .center_y()
+        .children(KINDS.into_iter().map(|kind| {
+            Checkbox::new(form.kind == kind)
+                .label(kind.label())
+                .on_toggle(move |s: &mut Workspace| {
+                    with_form(s, |f| {
+                        f.tag_open = false;
+                        f.set_kind(kind);
+                    })
+                })
+                .build(&t.k)
+                .key(format!("form-kind-{}", kind.label().to_lowercase()))
+        }));
     let kind = select_row("form-kind", kind);
 
     let tag = Select::new("form-tag", &tag_labels())
@@ -659,10 +645,7 @@ pub fn dialog(
         .open(form.tag_open)
         .placement(Placement::BottomStart)
         .on_toggle(|s: &mut Workspace| {
-            with_form(s, |f| {
-                f.tag_open = !f.tag_open;
-                f.kind_open = false;
-            })
+            with_form(s, |f| f.tag_open = !f.tag_open)
         })
         .on_close(|s: &mut Workspace| with_form(s, |f| f.tag_open = false))
         .on_choose(|s: &mut Workspace, label: &str, _tx: &mut Tx| {
