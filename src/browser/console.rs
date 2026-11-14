@@ -432,7 +432,10 @@ pub fn run(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
     match cmd {
         FocusResult => {
             if !focus_result(b, tx) {
-                hint(b, "No result yet · run the script with ⌘⏎ or F5");
+                let run = keys::with(|keymap| keymap.chords(RunScript));
+                let run: Vec<String> = run.iter().map(|chord| chord.label()).collect();
+                let run = run.join(" or ");
+                hint(b, format!("No result yet · run the script with {run}"));
             }
         }
         FocusEditor => focus(b, tx),

@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::{TestConfig, TestWorkspace};
-use crate::workspace::TabState;
+use crate::{settings::ThemeMode, workspace::TabState};
 
 #[test]
 fn cmd_shift_t_toggles_the_theme() {
@@ -12,9 +12,9 @@ fn cmd_shift_t_toggles_the_theme() {
     let mut ws = TestWorkspace::open(&config);
     assert!(ws.read(|w| w.is_dark()), "the test window starts dark");
     ws.press("cmd-shift-t");
-    assert_eq!(ws.read(|w| w.dark), Some(false));
+    assert_eq!(ws.read(|w| w.theme_mode), ThemeMode::Light);
     ws.press("cmd-shift-t");
-    assert_eq!(ws.read(|w| w.dark), Some(true));
+    assert_eq!(ws.read(|w| w.theme_mode), ThemeMode::Dark);
 }
 
 #[test]
@@ -26,8 +26,8 @@ fn cmd_n_opens_the_connection_form_and_escape_closes_it() {
     assert!(ws.has_dialog());
     ws.press("cmd-shift-t");
     assert_eq!(
-        ws.read(|w| w.dark),
-        None,
+        ws.read(|w| w.theme_mode),
+        ThemeMode::System,
         "workspace keys stay off while a dialog is open"
     );
     ws.press("escape");

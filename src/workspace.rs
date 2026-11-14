@@ -6,7 +6,7 @@ mod ui_tests;
 
 use std::{cell::Cell, time::Duration};
 
-use rune::{Cx, El, KeyEvent, PointerButton, TextEdit, Tx, Waker, col, row, text};
+use rune::{Cx, El, KeyEvent, MenuError, PointerButton, TextEdit, Tx, Waker, col, row, text};
 
 use crate::{
     browser::{self, Browser, Polled},
@@ -15,7 +15,8 @@ use crate::{
     dialog::{self, Dialog},
     form::{ConnectionForm, FormDialog},
     icons,
-    keys::{Command, Ctx},
+    keys::{self, Command, Ctx, Keymap},
+    settings::{SettingsFile, ThemeMode},
     theme::{Theme, theme},
     ui,
 };
@@ -72,6 +73,8 @@ pub struct Toast {
     pub due: Option<f64>,
 }
 
+type MenuSync = Box<dyn Fn() -> Result<(), MenuError>>;
+
 pub struct Workspace {
     pub home: Home,
     pub load_error: Option<String>,
@@ -80,14 +83,16 @@ pub struct Workspace {
     pub active: Option<usize>,
     pub dialog: Option<Dialog>,
     pub toasts: Vec<Toast>,
-    pub dark: Option<bool>,
-    pub dark_system: bool,
+    pub theme_mode: ThemeMode,
     pub system_dark: Cell<bool>,
     pub window_title: String,
     pub waker: Option<Waker>,
     pub polls: usize,
     pub refocus: bool,
     reveal: bool,
+    settings: SettingsFile,
+    menu_sync: Option<MenuSync>,
+    menu_stale: bool,
     #[cfg(test)]
     pub hold_connecting: bool,
     next_tab: u64,
@@ -100,7 +105,15 @@ impl Workspace {
             Ok(connections) => (connections, None),
             Err(err) => (Vec::new(), Some(format!("{err:#}"))),
         };
-        Self {
+        let settings = SettingsFile::at(store.settings_path());
+        let mut keymap = Keymap::default();
+        let (theme_mode, settings_problem) = match settings.load(&mut keymap) {
+            Ok(loaded) => (loaded.theme, loaded.problems.into_iter().next()),
+            Err(err) => (ThemeMode::default(), Some(format!("{err:#}"))),
+        };
+        let menu_stale = keymap.any_modified();
+        keys::update(|current| *current = keymap);
+        let mut workspace = Self {
             home: Home::new(store, connections),
             load_error,
             scratch: TextEdit::new(""),
@@ -108,26 +121,67 @@ impl Workspace {
             active: None,
             dialog: None,
             toasts: Vec::new(),
-            dark: None,
-            dark_system: true,
+            theme_mode,
             system_dark: Cell::new(true),
             window_title: model::APP_TITLE.to_string(),
             waker: None,
             polls: 0,
             refocus: false,
             reveal: false,
+            settings,
+            menu_sync: None,
+            menu_stale,
             #[cfg(test)]
             hold_connecting: false,
             next_tab: 1,
             next_toast: 1,
+        };
+        if let Some(problem) = settings_problem {
+            workspace.home.status = Some(format!("Settings: {problem}"));
         }
+        workspace
     }
 
     pub fn is_dark(&self) -> bool {
-        let system = self.system_dark.get();
-        match self.dark {
-            Some(dark) if self.dark_system == system => dark,
-            _ => system,
+        match self.theme_mode {
+            ThemeMode::System => self.system_dark.get(),
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+        }
+    }
+
+    pub fn set_theme(&mut self, mode: ThemeMode, tx: &mut Tx) {
+        if self.theme_mode != mode {
+            self.theme_mode = mode;
+            tx.color_motion(rune::tok::motion::CALM);
+            self.save_settings(tx);
+        }
+    }
+
+    pub fn on_menu_change(&mut self, sync: impl Fn() -> Result<(), MenuError> + 'static) {
+        self.menu_sync = Some(Box::new(sync));
+    }
+
+    pub fn keymap_changed(&mut self, tx: &mut Tx) {
+        self.menu_stale = true;
+        self.save_settings(tx);
+    }
+
+    fn save_settings(&mut self, tx: &mut Tx) {
+        let saved = keys::with(|keymap| self.settings.save(self.theme_mode, keymap));
+        if let Err(err) = saved {
+            let text = format!("The settings were not saved: {err:#}");
+            if !self.toasts.iter().any(|toast| toast.text == text) {
+                self.push_toast(text, true, tx);
+            }
+        }
+    }
+
+    fn sync_menu(&mut self) {
+        if self.menu_stale
+            && let Some(sync) = &self.menu_sync
+        {
+            self.menu_stale = matches!(sync(), Err(MenuError::NotRunning));
         }
     }
 
@@ -457,9 +511,7 @@ impl Workspace {
             index += 1;
         }
         changed |= self.expire_toasts(tx);
-        if self.dark.is_some() && self.dark_system != self.system_dark.get() {
-            self.dark = None;
-        }
+        self.sync_menu();
         if self.dialog.is_none() {
             let on_list = self.active.is_none() && tx.focused() == Some("home");
             if self.refocus && on_list {
@@ -559,7 +611,10 @@ impl Workspace {
     }
 
     pub fn run_from_menu(&mut self, cmd: Command, tx: &mut Tx) {
-        let global = matches!(cmd, Command::Quit | Command::ShowHelp);
+        let global = matches!(
+            cmd,
+            Command::Quit | Command::ShowHelp | Command::ShowSettings
+        );
         if global || self.dialog.is_none() {
             self.run(cmd, tx);
         }
@@ -577,6 +632,7 @@ impl Workspace {
                 true
             }
             ShowHelp => self.toggle_help(tx),
+            ShowSettings => self.toggle_settings(tx),
             CloseTab => match self.active {
                 Some(index) => {
                     self.disconnect(index, tx);
@@ -608,9 +664,12 @@ impl Workspace {
                 true
             }
             ToggleTheme => {
-                self.dark = Some(!self.is_dark());
-                self.dark_system = self.system_dark.get();
-                tx.color_motion(rune::tok::motion::CALM);
+                let mode = if self.is_dark() {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                };
+                self.set_theme(mode, tx);
                 true
             }
             CancelConnect => match self.active {
@@ -634,6 +693,17 @@ impl Workspace {
             Some(Dialog::Help(_)) => self.close_dialog(tx),
             None => {
                 self.dialog = Some(Dialog::Help(Box::default()));
+            }
+            Some(_) => return false,
+        }
+        true
+    }
+
+    fn toggle_settings(&mut self, tx: &mut Tx) -> bool {
+        match &self.dialog {
+            Some(Dialog::Settings(_)) => self.close_dialog(tx),
+            None => {
+                self.dialog = Some(Dialog::Settings(Box::default()));
             }
             Some(_) => return false,
         }
@@ -809,7 +879,7 @@ pub fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .w_full()
         .h_full()
         .fill(t.background)
-        .on_key(crate::keys::route)
+        .on_key(keys::route)
         .child(title_bar(s, t, cx))
         .child(col().key("body").grow(1.0).min_h(0.0).w_full().child(body));
     rune_kit::root(root, layer)
@@ -825,25 +895,41 @@ fn title_bar(s: &Workspace, t: &Theme, cx: &mut Cx<Workspace>) -> El {
         .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
         .window_drag();
+    let hint = keys::label(Command::ShowSettings).unwrap_or_default();
+    let settings = rune_kit::IconButton::new(&icons::SETTINGS)
+        .variant(rune_kit::IconButtonVariant::Ghost)
+        .control_size(rune_kit::ControlSize::Small)
+        .label("Settings")
+        .help(format!("Settings  {hint}"))
+        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+            s.run(Command::ShowSettings, tx);
+        })
+        .build(&t.k)
+        .key("open-settings");
     if s.tabs.is_empty() {
-        return bar.pl(insets.leading + 12.0).fill(t.background).child(
-            text(s.window_title.clone())
-                .key("window-title")
-                .font(t.text_sm)
-                .color(t.muted)
-                .truncate()
-                .grow(1.0)
-                .min_w(0.0)
-                .align(rune::Align::Center),
-        );
+        return bar
+            .pl(insets.leading + 12.0)
+            .fill(t.background)
+            .child(
+                text(s.window_title.clone())
+                    .key("window-title")
+                    .font(t.text_sm)
+                    .color(t.muted)
+                    .truncate()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .align(rune::Align::Center),
+            )
+            .child(settings);
     }
     bar.pl(insets.leading + 8.0)
         .fill(t.sidebar)
         .child(tab_strip(s, t))
+        .child(settings)
 }
 
 fn tab_strip(s: &Workspace, t: &Theme) -> El {
-    let home_hint = crate::keys::label(Command::GoHome).unwrap_or_default();
+    let home_hint = keys::label(Command::GoHome).unwrap_or_default();
     let home_tab = tab_button(
         "tab-home",
         "Connections",

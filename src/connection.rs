@@ -217,6 +217,10 @@ impl Store {
         Ok(Self { path, legacy_path })
     }
 
+    pub fn settings_path(&self) -> PathBuf {
+        self.path.with_file_name("settings.toml")
+    }
+
     pub fn load(&self) -> Result<Vec<Connection>> {
         let (data, from_legacy) = match read_optional(&self.path)? {
             Some(data) => (data, None),

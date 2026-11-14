@@ -8,6 +8,7 @@ mod help;
 mod highlight;
 mod icons;
 mod keys;
+mod settings;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -45,72 +46,79 @@ pub fn spec() -> AppSpec<Workspace> {
 fn menu_item(
     title: &str,
     menu: Option<&str>,
-    keys: Option<&str>,
+    cmd: Command,
     action: fn(&mut Workspace, &mut Tx),
 ) -> MenuItem<Workspace> {
     let mut item = MenuItem::new(title, action).keys_first();
     if let Some(menu) = menu {
         item = item.menu(menu);
     }
-    if let Some(shortcut) = keys.and_then(|keys| keys.parse::<Shortcut>().ok()) {
+    let shortcut =
+        keys::chord_of(cmd, 0).and_then(|chord| chord.to_string().parse::<Shortcut>().ok());
+    if let Some(shortcut) = shortcut {
         item = item.key_equivalent(shortcut);
     }
     item
 }
 
+fn menu_items() -> Vec<MenuItem<Workspace>> {
+    vec![
+        menu_item("Settings…", None, Command::ShowSettings, |s, tx| {
+            s.run_from_menu(Command::ShowSettings, tx)
+        }),
+        menu_item(
+            "New Connection…",
+            Some("File"),
+            Command::NewConnection,
+            |s, tx| s.run_from_menu(Command::NewConnection, tx),
+        ),
+        MenuItem::separator().menu("File"),
+        menu_item("Close Tab", Some("File"), Command::CloseTab, |s, tx| {
+            s.run_from_menu(Command::CloseTab, tx)
+        }),
+        menu_item("Connections", Some("View"), Command::GoHome, |s, tx| {
+            s.run_from_menu(Command::GoHome, tx)
+        }),
+        menu_item("Next Tab", Some("View"), Command::NextTab, |s, tx| {
+            s.run_from_menu(Command::NextTab, tx)
+        }),
+        menu_item("Previous Tab", Some("View"), Command::PrevTab, |s, tx| {
+            s.run_from_menu(Command::PrevTab, tx)
+        }),
+        MenuItem::separator().menu("View"),
+        menu_item(
+            "Toggle Light/Dark",
+            Some("View"),
+            Command::ToggleTheme,
+            |s, tx| s.run_from_menu(Command::ToggleTheme, tx),
+        ),
+        menu_item(
+            "Keyboard Shortcuts",
+            Some("Help"),
+            Command::ShowHelp,
+            |s, tx| s.run_from_menu(Command::ShowHelp, tx),
+        ),
+    ]
+}
+
 pub fn app(store: Store) -> App<Workspace> {
-    App::new(spec())
-        .init(move || Workspace::new(store))
+    let app = App::new(spec());
+    let handle = app.handle();
+    let app = app
+        .init(move || {
+            let mut workspace = Workspace::new(store);
+            workspace.on_menu_change(move || handle.set_menu(menu_items()));
+            workspace
+        })
         .maximized(true)
         .titlebar(Titlebar::new(TITLEBAR_HEIGHT))
         .tab_visits_controls(true)
         .on_ready(|_| apply_app_icon())
         .on_close(workspace::on_close)
-        .on_quit(workspace::on_quit)
-        .menu_item(menu_item(
-            "New Connection…",
-            Some("File"),
-            Some("cmd+n"),
-            |s, tx| s.run_from_menu(Command::NewConnection, tx),
-        ))
-        .menu_item(MenuItem::separator().menu("File"))
-        .menu_item(menu_item(
-            "Close Tab",
-            Some("File"),
-            Some("cmd+w"),
-            |s, tx| s.run_from_menu(Command::CloseTab, tx),
-        ))
-        .menu_item(menu_item(
-            "Connections",
-            Some("View"),
-            Some("cmd+1"),
-            |s, tx| s.run_from_menu(Command::GoHome, tx),
-        ))
-        .menu_item(menu_item(
-            "Next Tab",
-            Some("View"),
-            Some("cmd+shift+]"),
-            |s, tx| s.run_from_menu(Command::NextTab, tx),
-        ))
-        .menu_item(menu_item(
-            "Previous Tab",
-            Some("View"),
-            Some("cmd+shift+["),
-            |s, tx| s.run_from_menu(Command::PrevTab, tx),
-        ))
-        .menu_item(MenuItem::separator().menu("View"))
-        .menu_item(menu_item(
-            "Toggle Light/Dark",
-            Some("View"),
-            Some("cmd+shift+t"),
-            |s, tx| s.run_from_menu(Command::ToggleTheme, tx),
-        ))
-        .menu_item(menu_item(
-            "Keyboard Shortcuts",
-            Some("Help"),
-            Some("cmd+/"),
-            |s, tx| s.run_from_menu(Command::ShowHelp, tx),
-        ))
+        .on_quit(workspace::on_quit);
+    menu_items()
+        .into_iter()
+        .fold(app, |app, item| app.menu_item(item))
 }
 
 fn apply_app_icon() {

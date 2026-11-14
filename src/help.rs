@@ -1,10 +1,10 @@
-use rune::{Cx, El, KeyEvent, TextEdit, Tx, col, rich, row, text};
+use rune::{Chord, Cx, El, KeyEvent, TextEdit, Tx, col, rich, row, text};
 use rune_kit::TextInput;
 
 use crate::{
     dialog::Dialog,
     icons,
-    keys::{self, Ctx},
+    keys::{self, Command, Ctx},
     theme::Theme,
     ui::{self, Modal, Scroll, ScrollY},
     workspace::{self, Workspace},
@@ -13,6 +13,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     Stroke(&'static str),
+    Bound(Command, usize),
     Text(&'static str),
 }
 
@@ -30,7 +31,16 @@ const fn b(keys: &'static [Key], description: &'static str) -> Binding {
     Binding { keys, description }
 }
 
+use Command::*;
 use Key::{Stroke as K, Text as T};
+
+const fn c(cmd: Command) -> Key {
+    Key::Bound(cmd, 0)
+}
+
+const fn alt(cmd: Command) -> Key {
+    Key::Bound(cmd, 1)
+}
 
 const ELLIPSIS: Key = T("…");
 
@@ -39,12 +49,13 @@ const SECTIONS: &[Section] = &[
         title: "Global",
         bindings: &[
             b(
-                &[K("cmd-q")],
+                &[c(Quit)],
                 "Quit the application (closing the window quits too)",
             ),
-            b(&[K("cmd-/"), K("f1")], "Show or hide this help"),
+            b(&[c(ShowHelp), alt(ShowHelp)], "Show or hide this help"),
+            b(&[c(ShowSettings)], "Open the settings: theme and shortcuts"),
             b(
-                &[K("cmd-shift-t")],
+                &[c(ToggleTheme)],
                 "Switch between the dark and the light theme",
             ),
             b(
@@ -63,25 +74,25 @@ const SECTIONS: &[Section] = &[
     Section {
         title: "Tabs",
         bindings: &[
-            b(&[K("cmd-1")], "Go to the connection list (tab 1)"),
+            b(&[c(GoHome)], "Go to the connection list (tab 1)"),
             b(
-                &[K("cmd-2"), ELLIPSIS, K("cmd-9")],
+                &[c(ActivateTab(2)), ELLIPSIS, c(ActivateTab(9))],
                 "Go to the connection tab with that number (2 is the first)",
             ),
-            b(&[K("ctrl-tab"), K("cmd-shift-]")], "Next tab"),
-            b(&[K("ctrl-shift-tab"), K("cmd-shift-[")], "Previous tab"),
+            b(&[c(NextTab), alt(NextTab)], "Next tab"),
+            b(&[c(PrevTab), alt(PrevTab)], "Previous tab"),
             b(
                 &[T("Click a tab")],
                 "Switch to it; click its × to disconnect and close it",
             ),
-            b(&[K("cmd-w")], "Disconnect and close the current tab"),
+            b(&[c(CloseTab)], "Disconnect and close the current tab"),
         ],
     },
     Section {
         title: "Connections",
         bindings: &[
-            b(&[K("down")], "Select the next connection"),
-            b(&[K("up")], "Select the previous connection"),
+            b(&[c(SelectNext)], "Select the next connection"),
+            b(&[c(SelectPrev)], "Select the previous connection"),
             b(&[T("Type")], "Search the connections by name or type"),
             b(
                 &[K("cmd-v")],
@@ -90,16 +101,16 @@ const SECTIONS: &[Section] = &[
             b(&[K("escape"), K("ctrl-u")], "Clear the search"),
             b(&[T("Click")], "Select a connection"),
             b(
-                &[K("enter"), T("Double-click")],
+                &[c(Connect), T("Double-click")],
                 "Connect in a new tab (or go to its open tab)",
             ),
             b(
-                &[K("cmd-n")],
+                &[c(NewConnection)],
                 "Create a new connection (also the New connection button)",
             ),
-            b(&[K("cmd-e")], "Edit the selected connection"),
+            b(&[c(EditConnection)], "Edit the selected connection"),
             b(
-                &[K("cmd-backspace"), K("delete")],
+                &[c(DeleteConnection), c(DeleteForward)],
                 "Delete the selected connection (asks to confirm; in a search with text, ⌘⌫ \
                  deletes to its start and Delete the character after the caret)",
             ),
@@ -131,14 +142,14 @@ const SECTIONS: &[Section] = &[
         title: "Database browser",
         bindings: &[
             b(
-                &[K("f6"), K("shift-f6")],
+                &[c(FocusNextPane), c(FocusPrevPane)],
                 "Cycle the focus: schema tree → data, or SQL editor → result",
             ),
             b(
-                &[K("cmd-."), K("escape")],
+                &[c(CancelScript), K("escape")],
                 "Stop a running script from any pane (the first Esc stops it)",
             ),
-            b(&[K("cmd-p")], "Focus the schema tree"),
+            b(&[c(FocusTree)], "Focus the schema tree"),
             b(&[K("up"), K("down")], "Move the selection (tree, grid)"),
             b(
                 &[K("left"), K("right")],
@@ -150,30 +161,30 @@ const SECTIONS: &[Section] = &[
             ),
             b(&[T("Type")], "Search the loaded tables by name (tree)"),
             b(
-                &[K("cmd-d"), T("Right-click")],
+                &[c(ShowDdl), T("Right-click")],
                 "Show a table's DDL (tree: the selected table, or Show DDL in its menu)",
             ),
-            b(&[K("cmd-]"), K("cmd-[")], "Next / previous page"),
-            b(&[K("cmd-alt-["), K("cmd-alt-]")], "First / last page"),
+            b(&[c(NextPage), c(PrevPage)], "Next / previous page"),
+            b(&[c(FirstPage), c(LastPage)], "First / last page"),
             b(&[T("Pager buttons")], "First, previous, next and last page"),
             b(
-                &[K("cmd-r"), K("f5")],
+                &[c(Refresh), alt(Refresh)],
                 "Refresh the tree and the grid (F5 runs in the console)",
             ),
             b(
-                &[K("space"), K("enter"), T("Double-click")],
+                &[c(ToggleRecord), alt(ToggleRecord), T("Double-click")],
                 "Show the selected row in full (grid, result; Enter: grid)",
             ),
-            b(&[K("cmd-c")], "Copy the selected cell (grid, result)"),
+            b(&[c(CopyCell)], "Copy the selected cell (grid, result)"),
             b(
-                &[K("f2")],
+                &[c(EditRow)],
                 "Edit the selected value in the row view (tables with a primary key)",
             ),
             b(
-                &[K("cmd-shift-c")],
+                &[c(CopyRow)],
                 "Copy the selected row as tab-separated values",
             ),
-            b(&[K("cmd-e")], "Open the SQL console"),
+            b(&[c(OpenConsole)], "Open the SQL console"),
         ],
     },
     Section {
@@ -181,19 +192,19 @@ const SECTIONS: &[Section] = &[
         bindings: &[
             b(&[T("Wheel")], "Scroll the values"),
             b(&[T("Drag")], "Select a value to copy it"),
-            b(&[K("alt-down"), K("alt-up")], "Next / previous row"),
+            b(&[c(NextRecord), c(PrevRecord)], "Next / previous row"),
+            b(&[c(CopyCell), c(CopyRow)], "Copy the cell / the whole row"),
             b(
-                &[K("cmd-c"), K("cmd-shift-c")],
-                "Copy the cell / the whole row",
+                &[c(ToggleRecord), alt(ToggleRecord), c(CloseRecord)],
+                "Return to the grid",
             ),
-            b(&[K("space"), K("enter"), K("escape")], "Return to the grid"),
         ],
     },
     Section {
         title: "Edit row",
         bindings: &[
             b(
-                &[T("Click a value"), K("f2")],
+                &[T("Click a value"), c(EditRow)],
                 "Edit the value in place, in the row view (more values: click them too)",
             ),
             b(
@@ -201,7 +212,7 @@ const SECTIONS: &[Section] = &[
                 "Back to text (a changed value keeps its change until saved)",
             ),
             b(
-                &[K("tab"), K("shift-tab")],
+                &[c(NextField), c(PrevField)],
                 "Edit the next / previous value",
             ),
             b(
@@ -209,10 +220,10 @@ const SECTIONS: &[Section] = &[
                 "Set the value to NULL (typing a value unchecks it)",
             ),
             b(
-                &[K("cmd-enter"), K("cmd-s")],
+                &[c(SaveRow), alt(SaveRow)],
                 "Save the changed values (only if the row is still there)",
             ),
-            b(&[K("escape")], "Throw the changes away"),
+            b(&[c(CancelEdit)], "Throw the changes away"),
             b(
                 &[T("Production")],
                 "Saving asks to confirm first on a connection tagged Production",
@@ -223,7 +234,7 @@ const SECTIONS: &[Section] = &[
         title: "SQL console",
         bindings: &[
             b(
-                &[K("cmd-enter"), K("f5")],
+                &[c(RunScript), alt(RunScript)],
                 "Run the script, or only the selected text (editor or result)",
             ),
             b(
@@ -231,17 +242,17 @@ const SECTIONS: &[Section] = &[
                 "A script that changes data or schema asks to confirm first on a connection \
                  tagged Production (SELECT, SHOW, EXPLAIN… run directly)",
             ),
-            b(&[K("cmd-."), K("escape")], "Cancel the running script"),
+            b(&[c(CancelScript), K("escape")], "Cancel the running script"),
             b(
                 &[K("escape")],
                 "Go to the schema tree from the editor or the result grid (no script running)",
             ),
             b(
-                &[K("cmd-j")],
+                &[c(FocusResult)],
                 "Move the focus between the editor and the result grid",
             ),
             b(
-                &[K("f6"), K("shift-f6")],
+                &[c(FocusNextPane), c(FocusPrevPane)],
                 "Cycle the focus: tree → editor → result (once there is one)",
             ),
             b(&[K("cmd-z"), K("cmd-shift-z")], "Undo / redo"),
@@ -253,7 +264,7 @@ const SECTIONS: &[Section] = &[
             b(&[K("cmd-backspace")], "Delete to the start of the line"),
             b(&[K("up"), K("down")], "Move the selected row (result)"),
             b(
-                &[K("space"), T("Double-click")],
+                &[c(ToggleRecord), T("Double-click")],
                 "Show the selected row in full (result)",
             ),
         ],
@@ -279,7 +290,7 @@ const SECTIONS: &[Section] = &[
         title: "Help",
         bindings: &[
             b(&[T("Type")], "Filter commands by key or description"),
-            b(&[K("ctrl-u"), T("×")], "Clear the search query"),
+            b(&[c(ClearSearch), T("×")], "Clear the search query"),
             b(&[K("up"), K("down")], "Scroll the list"),
             b(&[K("pageup"), K("pagedown")], "Scroll the list by a page"),
             b(&[K("escape")], "Close the help window"),
@@ -287,13 +298,19 @@ const SECTIONS: &[Section] = &[
     },
 ];
 
-fn key_label(key: Key) -> String {
+fn key_chord(key: Key) -> Option<Chord> {
     match key {
-        Key::Stroke(spec) => match keys::gk_chord(spec) {
-            Some(chord) => chord.label(),
-            None => spec.to_string(),
-        },
-        Key::Text(text) => text.to_string(),
+        Key::Stroke(spec) => keys::gk_chord(spec),
+        Key::Bound(cmd, slot) => keys::chord_of(cmd, slot),
+        Key::Text(_) => None,
+    }
+}
+
+fn key_label(key: Key) -> String {
+    match (key, key_chord(key)) {
+        (_, Some(chord)) => chord.label(),
+        (Key::Stroke(text) | Key::Text(text), None) => text.to_string(),
+        (Key::Bound(..), None) => String::new(),
     }
 }
 
@@ -301,6 +318,11 @@ fn keys_text(keys: &[Key]) -> String {
     keys.iter()
         .map(|&key| match key {
             Key::Stroke(spec) => format!("{spec} {}", key_label(key)),
+            Key::Bound(..) => {
+                let spec = key_chord(key).map(|chord| chord.to_string());
+                let spec = spec.unwrap_or_default().replace("mod", "cmd");
+                format!("{} {}", spec.replace('+', "-"), key_label(key))
+            }
             Key::Text(text) => text.to_string(),
         })
         .collect::<Vec<_>>()
@@ -425,11 +447,8 @@ fn search_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-fn chip(spec: &str, t: &Theme) -> El {
-    let label = match keys::gk_chord(spec) {
-        Some(chord) => chord.label(),
-        None => spec.to_string(),
-    };
+fn chip(key: Key, t: &Theme) -> El {
+    let label = key_label(key);
     row()
         .h(20.0)
         .min_w(20.0)
@@ -451,7 +470,7 @@ fn key_chips(keys: &[Key], t: &Theme) -> El {
                 .is_some_and(|prev| keys[prev] != ELLIPSIS && key != ELLIPSIS)
                 .then(|| ui::label("/", t.text_sm, t.muted));
             let chip = match key {
-                Key::Stroke(spec) => chip(spec, t),
+                Key::Stroke(_) | Key::Bound(..) => chip(key, t),
                 Key::Text(words) => rich(
                     words.to_string(),
                     vec![rune::Span::new(0, words.len()).italic()],
@@ -572,8 +591,7 @@ pub fn dialog(_s: &Workspace, help: &Help, t: &Theme, cx: &mut Cx<Workspace>, la
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, SECTIONS, filtered, key_label};
-    use crate::keys::gk_chord;
+    use super::{Key, SECTIONS, filtered, key_chord, key_label};
 
     fn count(query: &str) -> usize {
         filtered(query).iter().map(|(_, b)| b.len()).sum()
@@ -584,8 +602,8 @@ mod tests {
         for section in SECTIONS {
             for binding in section.bindings {
                 for key in binding.keys {
-                    if let Key::Stroke(spec) = key {
-                        assert!(gk_chord(spec).is_some(), "{spec} in {}", section.title);
+                    if !matches!(key, Key::Text(_)) {
+                        assert!(key_chord(*key).is_some(), "{key:?} in {}", section.title);
                     }
                 }
             }

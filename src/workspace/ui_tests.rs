@@ -7,6 +7,7 @@ use crate::{
     dialog::Dialog,
     form::{ConnectionForm, FormValues},
     keys::Command,
+    settings::{Page, ThemeMode},
     test_support::{TestConfig, TestWorkspace, sqlite_connection},
 };
 
@@ -1337,27 +1338,198 @@ fn close_tab_is_left_unhandled_on_home() {
 }
 
 #[test]
-fn an_os_appearance_change_drops_a_manual_theme() {
+fn the_app_follows_the_os_until_a_theme_is_chosen() {
     let config = TestConfig::with_sample_dbs(&["shop"]);
     let mut ws = TestWorkspace::open(&config);
     assert!(ws.read(|w| w.is_dark()));
-    ws.press("cmd-shift-t");
-    assert!(!ws.read(|w| w.is_dark()));
-    ws.settle();
-    assert!(
-        !ws.read(|w| w.is_dark()),
-        "the toggle holds while the OS stays"
-    );
-
     ws.rt.set_system_dark(false);
     ws.settle();
-    assert!(!ws.read(|w| w.is_dark()));
-    assert_eq!(
-        ws.read(|w| w.dark),
-        None,
-        "the OS change replaced the toggle"
-    );
+    assert!(!ws.read(|w| w.is_dark()), "the app follows the OS");
+
+    ws.press("cmd-shift-t");
+    assert_eq!(ws.read(|w| w.theme_mode), ThemeMode::Dark);
     ws.rt.set_system_dark(true);
     ws.settle();
-    assert!(ws.read(|w| w.is_dark()), "the app follows the OS again");
+    ws.rt.set_system_dark(false);
+    ws.settle();
+    assert!(ws.read(|w| w.is_dark()), "a chosen theme outlives the OS");
+}
+
+fn settings_open(ws: &TestWorkspace) -> bool {
+    ws.read(|w| matches!(w.dialog, Some(Dialog::Settings(_))))
+}
+
+fn says(ws: &TestWorkspace, ancestor: &str, needle: &str) -> bool {
+    ws.descendants(ancestor)
+        .iter()
+        .any(|e| e.text.as_deref().is_some_and(|text| text.contains(needle)))
+}
+
+fn settings_toml(config: &TestConfig) -> String {
+    std::fs::read_to_string(config.dir().join("cooper").join("settings.toml")).unwrap_or_default()
+}
+
+#[test]
+fn the_settings_open_from_the_title_bar_and_the_keyboard() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    ws.click("open-settings");
+    assert!(settings_open(&ws), "{}", ws.describe());
+    ws.press("escape");
+    assert!(!ws.has_dialog(), "{}", ws.describe());
+
+    ws.press("cmd-,");
+    assert!(settings_open(&ws), "{}", ws.describe());
+    ws.press("cmd-,");
+    assert!(!ws.has_dialog(), "{}", ws.describe());
+}
+
+#[test]
+fn the_theme_is_picked_in_the_settings_and_remembered() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-,");
+    ws.click_in("theme-mode", "Light");
+    assert_eq!(ws.read(|w| w.theme_mode), ThemeMode::Light);
+    assert!(!ws.read(|w| w.is_dark()));
+    assert!(settings_toml(&config).contains("theme = \"light\""));
+
+    let ws = TestWorkspace::open(&config);
+    assert_eq!(ws.read(|w| w.theme_mode), ThemeMode::Light);
+    assert!(!ws.read(|w| w.is_dark()));
+}
+
+fn settings_page(ws: &TestWorkspace) -> Option<Page> {
+    ws.read(|w| match &w.dialog {
+        Some(Dialog::Settings(settings)) => Some(settings.page()),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_settings_pages_switch_from_the_sidebar() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-,");
+    assert_eq!(settings_page(&ws), Some(Page::General));
+    assert!(ws.exists("theme-mode"));
+    assert!(!ws.exists("settings-list"));
+
+    ws.click("settings-nav-shortcuts");
+    assert_eq!(settings_page(&ws), Some(Page::Shortcuts));
+    assert!(ws.exists("settings-list"), "{}", ws.describe());
+    assert!(!ws.exists("theme-mode"));
+
+    ws.click("shortcut-show-help-0");
+    ws.click("settings-nav-general");
+    assert!(ws.exists("theme-mode"));
+    ws.click("settings-nav-shortcuts");
+    assert!(
+        !says(&ws, "shortcut-show-help-0", "Press keys"),
+        "leaving the page stops the recording"
+    );
+
+    ws.press("escape cmd-,");
+    assert_eq!(settings_page(&ws), Some(Page::General));
+}
+
+fn help_open(ws: &TestWorkspace) -> bool {
+    ws.read(|w| matches!(w.dialog, Some(Dialog::Help(_))))
+}
+
+#[test]
+fn a_shortcut_is_recorded_in_the_settings_and_remembered() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-,");
+    ws.click("settings-nav-shortcuts");
+    ws.click("shortcut-show-help-0");
+    assert!(
+        says(&ws, "shortcut-show-help-0", "Press keys"),
+        "{}",
+        ws.describe()
+    );
+
+    ws.press("k");
+    assert!(
+        says(&ws, "shortcut-row-show-help", "needs a modifier"),
+        "{}",
+        ws.describe()
+    );
+    ws.press("escape");
+    assert!(settings_open(&ws), "the first Esc only stops the recording");
+    assert!(!ws.exists("reset-show-help"));
+
+    ws.click("shortcut-show-help-0");
+    ws.press("cmd-k");
+    assert!(ws.exists("reset-show-help"), "{}", ws.describe());
+    assert!(settings_toml(&config).contains("show-help = [\"mod+k\", \"f1\"]"));
+    ws.press("escape");
+    assert!(!ws.has_dialog());
+
+    ws.press("cmd-/");
+    assert!(!help_open(&ws), "the old shortcut is free");
+    ws.press("cmd-k");
+    assert!(help_open(&ws));
+    ws.press("escape");
+
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-k");
+    assert!(help_open(&ws), "the shortcut was loaded");
+    ws.press("escape");
+
+    ws.press("cmd-,");
+    ws.click("settings-nav-shortcuts");
+    ws.click("reset-show-help");
+    assert!(!ws.exists("reset-show-help"));
+    assert!(!settings_toml(&config).contains("show-help"));
+    ws.press("escape cmd-/");
+    assert!(help_open(&ws));
+}
+
+#[test]
+fn a_shortcut_taken_elsewhere_is_flagged_and_reset_all_clears_it() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-,");
+    ws.click("settings-nav-shortcuts");
+    assert!(!ws.exists("reset-all-shortcuts"));
+    ws.click("shortcut-show-help-0");
+    ws.press("cmd-w");
+    let taken = "also used by: Disconnect and close the tab";
+    assert!(
+        says(&ws, "shortcut-row-show-help", taken),
+        "{}",
+        ws.describe()
+    );
+
+    ws.click("reset-all-shortcuts");
+    assert!(!ws.exists("reset-all-shortcuts"));
+    assert!(!ws.exists("reset-show-help"));
+    assert!(!settings_toml(&config).contains("keys"));
+}
+
+#[test]
+fn snapshots_of_the_settings() {
+    let Some(dir) = std::env::var_os("SETTINGS_SNAPS") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for dark in [true, false] {
+        let theme = if dark { "dark" } else { "light" };
+        let shot = |ws: &mut TestWorkspace, name: &str| {
+            crate::test_support::snap_png(&mut ws.rt, &dir.join(format!("{name}-{theme}.png")));
+        };
+        let config = TestConfig::with_sample_dbs(&["shop"]);
+        let mut ws = TestWorkspace::open_with(config.store(), dark);
+        ws.press("cmd-,");
+        shot(&mut ws, "01-general");
+        ws.click("settings-nav-shortcuts");
+        shot(&mut ws, "02-shortcuts");
+        ws.click("shortcut-show-help-0");
+        ws.press("k");
+        shot(&mut ws, "03-recording");
+        ws.press("cmd-w");
+        shot(&mut ws, "04-conflict");
+    }
 }

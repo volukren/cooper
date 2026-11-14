@@ -605,7 +605,7 @@ fn f6_and_cmd_j_reach_the_result_grid() {
     assert!(editor_focused(&ws));
     assert_eq!(
         hint(&ws).as_deref(),
-        Some("No result yet · run the script with ⌘⏎ or F5")
+        Some("No result yet · run the script with ⌘↩ or F5")
     );
     ws.press("shift-f6");
     assert!(tree_focused(&ws), "back from the editor: the tree");
