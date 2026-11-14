@@ -33,6 +33,15 @@ pub enum StatusKind {
 
 const TAB_TITLE_MAX: usize = 24;
 
+pub fn tab_help(name: &str, read_only: bool) -> String {
+    let name = db::render_text(name);
+    if read_only {
+        format!("{name} · Read-only")
+    } else {
+        name
+    }
+}
+
 pub struct Home {
     store: Store,
     pub connections: Vec<Connection>,
@@ -383,6 +392,7 @@ mod tests {
             name: name.to_string(),
             kind: DbKind::Sqlite,
             tag: None,
+            read_only: false,
             host: String::new(),
             port: None,
             user: String::new(),
@@ -565,6 +575,7 @@ mod tests {
             name: "dev".into(),
             kind: DbKind::Postgres,
             tag: None,
+            read_only: false,
             host: "localhost".into(),
             port: Some(5432),
             user: "postgres".into(),

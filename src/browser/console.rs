@@ -104,6 +104,7 @@ pub struct Run {
 pub enum Outcome {
     Done(Rc<ScriptResult>),
     Failed(String),
+    Refused(String),
     Cancelled,
 }
 
@@ -188,6 +189,7 @@ impl Console {
         Some(match self.outcome.as_ref()? {
             Outcome::Done(result) => ui::summary(result),
             Outcome::Failed(message) => format!("error: {message}"),
+            Outcome::Refused(message) => format!("refused: {message}"),
             Outcome::Cancelled => "cancelled".to_string(),
         })
     }
@@ -195,7 +197,7 @@ impl Console {
     pub fn result(&self) -> Option<&Rc<ScriptResult>> {
         match self.outcome.as_ref()? {
             Outcome::Done(result) => Some(result),
-            Outcome::Failed(_) | Outcome::Cancelled => None,
+            Outcome::Failed(_) | Outcome::Refused(_) | Outcome::Cancelled => None,
         }
     }
 
@@ -476,6 +478,7 @@ fn result_text_selected(tx: &Tx) -> bool {
 }
 
 const ALREADY_RUNNING: &str = "A script is already running · Esc cancels it";
+const REFUSED_TITLE: &str = "Not run: the connection is read-only";
 
 fn run_script(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
     let Some((b, dialog)) = s.browser_and_dialog(tab) else {
@@ -488,6 +491,11 @@ fn run_script(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
         return hint(b, "Nothing to run: the editor is empty");
     };
     clear_status(b);
+    if b.connection.read_only
+        && let Some(message) = guard::refusal(&sql, b.connection.kind)
+    {
+        return refuse(b, message, tx);
+    }
     if b.connection.asks_to_confirm() {
         let statements = guard::writes(&sql, b.connection.kind);
         if !statements.is_empty() {
@@ -508,6 +516,15 @@ pub(super) fn run_confirmed(b: &mut Browser, sql: String, tx: &mut Tx) {
         return hint(b, ALREADY_RUNNING);
     }
     start_script(b, &sql, tx);
+}
+
+fn refuse(b: &mut Browser, message: String, tx: &mut Tx) {
+    if tx.focused() == Some(GRID) {
+        focus_result_pane(b, tx);
+    }
+    let c = &mut b.console;
+    c.outcome = Some(Outcome::Refused(message));
+    c.record = None;
 }
 
 fn start_script(b: &mut Browser, sql: &str, tx: &mut Tx) {
@@ -1461,6 +1478,57 @@ fn centered() -> El {
     col().grow(1.).w_full().h_full().center().gap(8.)
 }
 
+struct Notice {
+    key: &'static str,
+    glyph: &'static rune::Icon,
+    title: &'static str,
+    title_color: rune::Color,
+    text_color: rune::Color,
+}
+
+fn message_view(tab: TabId, notice: &Notice, message: &str, t: &Theme) -> El {
+    let copied = message.to_string();
+    col()
+        .key(notice.key)
+        .grow(1.)
+        .w_full()
+        .min_h(0.)
+        .padding(12.)
+        .gap(8.)
+        .child(
+            row()
+                .gap(8.)
+                .center_y()
+                .child(ui::icon_el(notice.glyph, 16., notice.title_color))
+                .child(ui::label(notice.title, t.bold(t.text), notice.title_color))
+                .child(
+                    icon_button(&icons::COPY, "Copy the error message")
+                        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                            copy_value(s, tab, copied.clone(), tx)
+                        })
+                        .build(&t.k)
+                        .key("copy-error"),
+                ),
+        )
+        .child(
+            col()
+                .key("script-error")
+                .grow(1.)
+                .min_h(0.)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    text(message.to_string())
+                        .font(t.text_sm)
+                        .color(notice.text_color)
+                        .wrap_anywhere()
+                        .selectable(true)
+                        .key(ERROR_TEXT),
+                ),
+        )
+}
+
 fn result_body(b: &Browser, tab: TabId, t: &Theme) -> El {
     let c = &b.console;
     if let Some(run) = &c.run {
@@ -1490,48 +1558,30 @@ fn result_body(b: &Browser, tab: TabId, t: &Theme) -> El {
             .key("console-cancelled")
             .child(ui::icon_el(&icons::CIRCLE_X, 20., t.warning))
             .child(ui::label("Script cancelled", t.text, t.warning)),
-        Some(Outcome::Failed(message)) => {
-            let copied = message.clone();
-            col()
-                .key("console-failed")
-                .grow(1.)
-                .w_full()
-                .min_h(0.)
-                .padding(12.)
-                .gap(8.)
-                .child(
-                    row()
-                        .gap(8.)
-                        .center_y()
-                        .child(ui::icon_el(&icons::TRIANGLE_ALERT, 16., t.danger))
-                        .child(ui::label("Script failed", t.bold(t.text), t.danger))
-                        .child(
-                            icon_button(&icons::COPY, "Copy the error message")
-                                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                                    copy_value(s, tab, copied.clone(), tx)
-                                })
-                                .build(&t.k)
-                                .key("copy-error"),
-                        ),
-                )
-                .child(
-                    col()
-                        .key("script-error")
-                        .grow(1.)
-                        .min_h(0.)
-                        .scroll(ScrollSpec {
-                            stick_bottom: false,
-                        })
-                        .child(
-                            text(message.clone())
-                                .font(t.text_sm)
-                                .color(t.danger)
-                                .wrap_anywhere()
-                                .selectable(true)
-                                .key(ERROR_TEXT),
-                        ),
-                )
-        }
+        Some(Outcome::Failed(message)) => message_view(
+            tab,
+            &Notice {
+                key: "console-failed",
+                glyph: &icons::TRIANGLE_ALERT,
+                title: "Script failed",
+                title_color: t.danger,
+                text_color: t.danger,
+            },
+            message,
+            t,
+        ),
+        Some(Outcome::Refused(message)) => message_view(
+            tab,
+            &Notice {
+                key: "console-refused",
+                glyph: &icons::LOCK,
+                title: REFUSED_TITLE,
+                title_color: t.blue,
+                text_color: t.foreground,
+            },
+            message,
+            t,
+        ),
         Some(Outcome::Done(result)) if result.result_sets == 0 => centered()
             .key("console-completed")
             .child(ui::icon_el(&icons::CIRCLE_CHECK, 20., t.success))

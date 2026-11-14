@@ -146,6 +146,7 @@ fn postgres_plain(name: &str) -> Connection {
         name: name.into(),
         kind: DbKind::Postgres,
         tag: None,
+        read_only: false,
         host: "db.invalid".into(),
         port: Some(5432),
         user: "app".into(),
@@ -900,7 +901,11 @@ fn the_type_checkboxes_switch_fields_and_ports() {
     ws.click("form-kind-sqlite");
     assert_eq!(values(&ws).kind, DbKind::Sqlite);
     ws.click("form-kind-sqlite");
-    assert_eq!(values(&ws).kind, DbKind::Sqlite, "the checked type stays checked");
+    assert_eq!(
+        values(&ws).kind,
+        DbKind::Sqlite,
+        "the checked type stays checked"
+    );
     ws.click("form-kind-mysql");
     let v = values(&ws);
     assert_eq!(v.kind, DbKind::MySql, "{v:?}");
@@ -922,6 +927,67 @@ fn the_type_checkboxes_switch_fields_and_ports() {
     ws.press("escape");
     wait_dialog_closed(&mut ws);
     assert!(config.connections_toml().is_empty(), "nothing saved");
+}
+
+#[test]
+fn read_only_is_saved_shown_and_cleared() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let path = config.dir().join("data").join("shop.db");
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-n");
+    ws.type_text("replica");
+    set_kind(&mut ws, DbKind::Sqlite);
+    set_text(&mut ws, "database", &path.to_string_lossy());
+    assert!(!values(&ws).read_only, "a new connection can write");
+    assert!(!ws.exists("form-read-only-hint"));
+    assert_eq!(
+        ws.find("form-read-only").and_then(|e| e.label).as_deref(),
+        Some("Read-only")
+    );
+
+    ws.click("form-read-only");
+    assert!(values(&ws).read_only);
+    assert!(ws.exists("form-read-only-hint"));
+    assert!(ws.has_dialog(), "ticking the box does not submit the form");
+    ws.click("form-read-only");
+    assert!(!values(&ws).read_only, "the box toggles");
+    ws.focus("form-read-only");
+    ws.press("space");
+    assert!(values(&ws).read_only, "Space ticks the focused box");
+    ws.update(|w, _| form_mut(w).set_tag(Some(Tag::Prod)));
+    assert!(
+        !ws.exists("form-tag-hint"),
+        "nothing asks to confirm on a read-only connection"
+    );
+    ws.update(|w, _| form_mut(w).set_read_only(false));
+    assert!(ws.exists("form-tag-hint"));
+    ws.update(|w, _| {
+        form_mut(w).set_tag(None);
+        form_mut(w).set_read_only(true);
+    });
+    assert!(ws.overflows().is_empty(), "{:?}", ws.overflows());
+
+    focus_field(&mut ws, "name");
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    let toml = config.connections_toml();
+    assert!(toml.contains("read_only = true"), "{toml}");
+    assert_eq!(selected(&ws).as_deref(), Some("replica"));
+    assert!(ws.exists("connection-1-read-only"));
+    assert!(!ws.exists("connection-0-read-only"), "shop can write");
+    assert!(ws.exists("details-read-only"));
+
+    ws.press("cmd-e");
+    assert!(values(&ws).read_only, "the form opens with the box ticked");
+    assert!(ws.exists("form-read-only-hint"));
+    ws.click("form-read-only");
+    focus_field(&mut ws, "name");
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    let toml = config.connections_toml();
+    assert!(!toml.contains("read_only"), "{toml}");
+    assert!(!ws.exists("connection-1-read-only"));
+    assert!(!ws.exists("details-read-only"));
 }
 
 #[test]

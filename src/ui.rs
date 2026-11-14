@@ -116,6 +116,38 @@ pub fn tag_badge(tag: Tag, t: &Theme) -> El {
         )
 }
 
+pub const READ_ONLY: &str = "Read-only";
+
+pub fn read_only_badge(t: &Theme) -> El {
+    row()
+        .role("status")
+        .label(READ_ONLY)
+        .h(18.0)
+        .pl(5.0)
+        .pr(7.0)
+        .gap(4.0)
+        .center()
+        .radius(9.0)
+        .fill(t.k.alpha(t.muted, 0.12))
+        .border(1.0, t.k.alpha(t.muted, 0.35))
+        .child(icon_el(&crate::icons::LOCK, 11.0, t.muted))
+        .child(
+            text(READ_ONLY)
+                .font(t.medium(t.text_xs))
+                .color(t.muted)
+                .a11y_hidden(),
+        )
+}
+
+pub fn read_only_mark(t: &Theme) -> El {
+    row()
+        .role("status")
+        .label(READ_ONLY)
+        .size(16.0, 16.0)
+        .center()
+        .child(icon_el(&crate::icons::LOCK, 13.0, t.muted))
+}
+
 pub fn pane(key: impl Into<String>, title: El, extra: Option<El>, body: El, t: &Theme) -> El {
     col()
         .key(key)

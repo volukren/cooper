@@ -1011,11 +1011,16 @@ fn tab_strip(s: &Workspace, t: &Theme) -> El {
             lead,
             t,
         )
-        .help(crate::db::render_text(tab.name()))
+        .help(model::tab_help(tab.name(), tab.connection.read_only))
         .children(
             tab.connection
                 .tag
                 .map(|tag| ui::tag_badge(tag, t).key(format!("tab-{}-tag", id.0))),
+        )
+        .children(
+            tab.connection
+                .read_only
+                .then(|| ui::read_only_mark(t).key(format!("tab-{}-read-only", id.0))),
         )
         .children(model::tab_shortcut(index).map(|hint| ui::label(hint, t.text_xs, t.muted)))
         .child(close)

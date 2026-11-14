@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub const PREVIEW_CHARS: usize = 120;
+pub const MAX_REFUSED: usize = 5;
 
 const UNKNOWN: &str = "UNKNOWN";
 const UNTERMINATED: &str = "UNTERMINATED";
@@ -127,6 +128,10 @@ const EXPLAINED: [&str; 12] = [
 
 const SET_WRITES: [&str; 4] = ["GLOBAL", "PERSIST", "PERSIST_ONLY", "PASSWORD"];
 
+const SESSION_VERBS: [&str; 4] = ["SET", "RESET", "BEGIN", "START"];
+const READ_ONLY_SETTING: &str = "read_only";
+const SETTING_FUNCTION: &str = "set_config";
+
 const PRAGMA_WRITES: [&str; 4] = [
     "optimize",
     "incremental_vacuum",
@@ -156,12 +161,39 @@ pub struct Statement {
 }
 
 pub fn writes(sql: &str, kind: DbKind) -> Vec<Statement> {
+    found(sql, kind, false)
+}
+
+pub fn refused(sql: &str, kind: DbKind) -> Vec<Statement> {
+    found(sql, kind, true)
+}
+
+pub fn refusal(sql: &str, kind: DbKind) -> Option<String> {
+    let refused = refused(sql, kind);
+    let what = match refused.len() {
+        0 => return None,
+        1 => "a statement that is not a plain read".to_string(),
+        n => format!("{n} statements that are not plain reads"),
+    };
+    let mut message =
+        format!("Nothing was run: this connection is read-only, and the script has {what}:");
+    for stmt in refused.iter().take(MAX_REFUSED) {
+        message.push_str("\n\n");
+        message.push_str(&stmt.text);
+    }
+    if refused.len() > MAX_REFUSED {
+        message.push_str(&format!("\n\n…and {} more", refused.len() - MAX_REFUSED));
+    }
+    Some(message)
+}
+
+fn found(sql: &str, kind: DbKind, strict: bool) -> Vec<Statement> {
     let escapes = kind == DbKind::MySql;
-    let mut found = scan(sql, kind, escapes);
+    let mut found = scan(sql, kind, escapes, strict);
     if kind == DbKind::Sqlite {
         return found;
     }
-    let other = scan(sql, kind, !escapes);
+    let other = scan(sql, kind, !escapes, strict);
     if other.iter().all(|stmt| stmt.verb != UNTERMINATED) {
         found.retain(|stmt| stmt.verb != UNTERMINATED);
     }
@@ -188,7 +220,7 @@ pub fn row_update(kind: DbKind, update: &RowUpdate) -> Result<Statement, String>
     })
 }
 
-fn scan(sql: &str, kind: DbKind, backslash: bool) -> Vec<Statement> {
+fn scan(sql: &str, kind: DbKind, backslash: bool, strict: bool) -> Vec<Statement> {
     let lexer = Lexer {
         src: sql,
         kind,
@@ -199,6 +231,7 @@ fn scan(sql: &str, kind: DbKind, backslash: bool) -> Vec<Statement> {
         .into_iter()
         .filter_map(|piece| {
             let verdict = classify(sql, kind, &piece.tokens)
+                .or_else(|| lifts_read_only(sql, &piece.tokens).filter(|_| strict))
                 .or_else(|| piece.open.then(|| Verdict::write(UNTERMINATED)))?;
             let (first, last) = (piece.tokens.first()?, piece.tokens.last()?);
             Some(Statement {
@@ -591,6 +624,31 @@ fn calls(src: &str, all: &[Token], verb: &str) -> Option<Verdict> {
             .find(|f| f.eq_ignore_ascii_case(name))?;
         (pair[1].tok == Tok::Open).then(|| Verdict::write(format!("{verb} {function}()")))
     })
+}
+
+fn lifts_read_only(src: &str, toks: &[Token]) -> Option<Verdict> {
+    let sets_config = toks.windows(2).any(|pair| {
+        pair[1].tok == Tok::Open
+            && function_name(src, &pair[0])
+                .is_some_and(|name| name.eq_ignore_ascii_case(SETTING_FUNCTION))
+    });
+    if sets_config {
+        return Some(Verdict::write(format!("{SETTING_FUNCTION}()")));
+    }
+    let verb = upper(src, toks.iter().find(|t| t.tok != Tok::Open)?)?;
+    if !SESSION_VERBS.contains(&verb.as_str()) {
+        return None;
+    }
+    let names_setting = toks.iter().any(|t| {
+        src[t.start..t.end]
+            .to_ascii_lowercase()
+            .contains(READ_ONLY_SETTING)
+    });
+    let read_write = toks
+        .windows(2)
+        .any(|pair| is(src, &pair[0], "READ") && is(src, &pair[1], "WRITE"));
+    let reset_all = verb == "RESET" && toks.iter().any(|t| is(src, t, "ALL"));
+    (names_setting || read_write || reset_all).then(|| Verdict::write(verb))
 }
 
 fn begin(src: &str, kind: DbKind, stmt: &[Token]) -> Option<Verdict> {

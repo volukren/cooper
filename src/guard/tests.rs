@@ -1,4 +1,4 @@
-use super::{PREVIEW_CHARS, preview, row_update, writes};
+use super::{MAX_REFUSED, PREVIEW_CHARS, preview, refusal, refused, row_update, writes};
 use crate::{connection::DbKind, db::RowUpdate};
 
 const ALL: [DbKind; 3] = [DbKind::Postgres, DbKind::MySql, DbKind::Sqlite];
@@ -617,4 +617,175 @@ fn a_row_update_reads_as_the_sql_that_saves_it() {
         row_update(DbKind::Sqlite, &bare).is_err(),
         "an edit the save would reject is not previewed"
     );
+}
+
+fn refused_verbs(sql: &str, kind: DbKind) -> Vec<String> {
+    refused(sql, kind)
+        .into_iter()
+        .map(|stmt| stmt.verb)
+        .collect()
+}
+
+#[test]
+fn a_read_only_connection_refuses_everything_that_asks_to_confirm() {
+    let scripts = [
+        "UPDATE t SET a = 1",
+        "SELECT 1; DELETE FROM t WHERE id = 1; SELECT 2",
+        "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+        "SELECT nextval('s')",
+        "CREATE TABLE t (id int)",
+        "EXPLAIN ANALYZE DELETE FROM t",
+        "CALL p()",
+        "SELECT 'unterminated",
+        "frobnicate",
+    ];
+    for kind in ALL {
+        for sql in scripts {
+            assert_eq!(refused(sql, kind), writes(sql, kind), "{kind:?}: {sql}");
+            assert!(!refused(sql, kind).is_empty(), "{kind:?}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn a_read_only_connection_runs_plain_reads() {
+    for kind in ALL {
+        for sql in [
+            "SELECT * FROM t",
+            "select 1; SELECT 2;",
+            "",
+            "-- only a comment",
+            "EXPLAIN SELECT * FROM t",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "BEGIN; SELECT 1; COMMIT",
+            "START TRANSACTION; SELECT 1; ROLLBACK",
+            "BEGIN TRANSACTION READ ONLY; SELECT 1; COMMIT",
+            "START TRANSACTION READ ONLY",
+            "SET search_path = app",
+            "SELECT read_only, 'READ WRITE' FROM flags",
+            "SELECT * FROM t WHERE note = 'SET transaction_read_only = off'",
+        ] {
+            assert_eq!(refused_verbs(sql, kind), [] as [&str; 0], "{kind:?}: {sql}");
+            assert_eq!(refusal(sql, kind), None, "{kind:?}: {sql}");
+        }
+    }
+    for sql in [
+        "SHOW search_path",
+        "RESET search_path",
+        "SET LOCAL work_mem = '1MB'",
+    ] {
+        assert_eq!(
+            refused_verbs(sql, DbKind::Postgres),
+            [] as [&str; 0],
+            "{sql}"
+        );
+    }
+    for sql in ["SHOW TABLES", "SET @x = 1", "USE shop", "SET NAMES utf8mb4"] {
+        assert_eq!(refused_verbs(sql, DbKind::MySql), [] as [&str; 0], "{sql}");
+    }
+    for sql in ["PRAGMA table_info(t)", "PRAGMA query_only"] {
+        assert_eq!(refused_verbs(sql, DbKind::Sqlite), [] as [&str; 0], "{sql}");
+    }
+}
+
+#[test]
+fn statements_that_lift_the_read_only_mode_are_refused_only_when_read_only() {
+    let postgres: [(&str, &str); 14] = [
+        ("SET default_transaction_read_only = off", "SET"),
+        ("set DEFAULT_TRANSACTION_READ_ONLY to off", "SET"),
+        ("SET \"default_transaction_read_only\" = off", "SET"),
+        ("SET LOCAL transaction_read_only = off", "SET"),
+        (
+            "SET SESSION default_transaction_read_only TO DEFAULT",
+            "SET",
+        ),
+        ("SET TRANSACTION READ WRITE", "SET"),
+        (
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "SET",
+        ),
+        ("RESET default_transaction_read_only", "RESET"),
+        ("RESET ALL", "RESET"),
+        ("BEGIN READ WRITE", "BEGIN"),
+        (
+            "BEGIN ISOLATION LEVEL SERIALIZABLE, READ /* x */ WRITE",
+            "BEGIN",
+        ),
+        ("START TRANSACTION READ WRITE", "START"),
+        (
+            "SELECT set_config('default_transaction_read_only', 'off', false)",
+            "set_config()",
+        ),
+        (
+            "SELECT pg_catalog.\"set_config\" ('x', 'y', true)",
+            "set_config()",
+        ),
+    ];
+    for (sql, verb) in postgres {
+        assert_eq!(refused_verbs(sql, DbKind::Postgres), [verb], "{sql}");
+        assert_eq!(
+            verbs(sql, DbKind::Postgres),
+            [],
+            "{sql}: no write to confirm"
+        );
+    }
+    let mysql: [(&str, &str); 7] = [
+        ("SET SESSION TRANSACTION READ WRITE", "SET"),
+        ("SET TRANSACTION READ WRITE", "SET"),
+        ("SET SESSION transaction_read_only = OFF", "SET"),
+        ("SET @@session.transaction_read_only = 0", "SET"),
+        ("SET @@tx_read_only = 0", "SET"),
+        ("SET `transaction_read_only` = 0", "SET"),
+        ("START TRANSACTION READ WRITE", "START"),
+    ];
+    for (sql, verb) in mysql {
+        assert_eq!(refused_verbs(sql, DbKind::MySql), [verb], "{sql}");
+        assert_eq!(verbs(sql, DbKind::MySql), [], "{sql}: no write to confirm");
+    }
+    for sql in ["PRAGMA query_only = OFF", "PRAGMA query_only(0)"] {
+        assert_eq!(refused_verbs(sql, DbKind::Sqlite), ["PRAGMA"], "{sql}");
+    }
+    assert_eq!(
+        refused_verbs(
+            "SELECT 1; SET default_transaction_read_only = off; DELETE FROM t",
+            DbKind::Postgres
+        ),
+        ["SET", "DELETE"]
+    );
+}
+
+#[test]
+fn the_refusal_names_the_statements_that_were_not_plain_reads() {
+    let one = refusal(
+        "SELECT 1;\nUPDATE t\n   SET a = 1\n WHERE id = 2;",
+        DbKind::Postgres,
+    )
+    .unwrap();
+    assert_eq!(
+        one,
+        "Nothing was run: this connection is read-only, and the script has a statement \
+         that is not a plain read:\n\nUPDATE t SET a = 1 WHERE id = 2"
+    );
+
+    let many: String = (0..MAX_REFUSED + 2)
+        .map(|i| format!("DELETE FROM t WHERE id = {i};"))
+        .collect();
+    let text = refusal(&many, DbKind::Sqlite).unwrap();
+    assert!(
+        text.contains(&format!(
+            "the script has {} statements that are not plain reads:",
+            MAX_REFUSED + 2
+        )),
+        "{text}"
+    );
+    assert!(text.contains("DELETE FROM t WHERE id = 0"), "{text}");
+    assert!(
+        text.contains(&format!("DELETE FROM t WHERE id = {}", MAX_REFUSED - 1)),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("DELETE FROM t WHERE id = {MAX_REFUSED}")),
+        "{text}"
+    );
+    assert!(text.ends_with("…and 2 more"), "{text}");
 }

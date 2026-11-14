@@ -108,6 +108,7 @@ pub fn sqlite_connection(name: &str, path: &Path) -> Connection {
         name: name.to_string(),
         kind: DbKind::Sqlite,
         tag: None,
+        read_only: false,
         host: String::new(),
         port: None,
         user: String::new(),

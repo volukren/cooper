@@ -282,6 +282,11 @@ fn connection_row(s: &Workspace, index: usize, t: &Theme) -> El {
         conn.tag
             .map(|tag| ui::tag_badge(tag, t).key(format!("connection-{index}-tag"))),
     )
+    .children(conn.read_only.then(|| {
+        ui::read_only_mark(t)
+            .help(ui::READ_ONLY)
+            .key(format!("connection-{index}-read-only"))
+    }))
     .children(open.then(|| {
         rune::el()
             .key("open-dot")
@@ -343,6 +348,9 @@ fn details(s: &Workspace, t: &Theme) -> El {
         fields.push(("Database", conn.database.clone()));
     }
     fields.push(("URL", conn.summary()));
+    if conn.read_only {
+        fields.push(("Access", "Read-only".to_string()));
+    }
     let header = row()
         .key("details-header")
         .w_full()
@@ -376,6 +384,10 @@ fn details(s: &Workspace, t: &Theme) -> El {
                                 )
                                 .children(
                                     conn.tag.map(|tag| ui::tag_badge(tag, t).key("details-tag")),
+                                )
+                                .children(
+                                    conn.read_only
+                                        .then(|| ui::read_only_badge(t).key("details-read-only")),
                                 ),
                         )
                         .child(ui::label(conn.kind.label(), t.text_sm, t.muted)),
