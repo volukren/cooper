@@ -6,7 +6,7 @@ use rune::{
 };
 
 use crate::{
-    connection::DbKind,
+    connection::{DbKind, Tag},
     db::ScriptResult,
     highlight::Highlighter,
     theme::{RADIUS, Theme},
@@ -88,6 +88,25 @@ pub fn icon_el(glyph: &'static Icon, size: f32, color: Color) -> El {
 
 pub fn label(content: impl Into<String>, style: TextStyle, color: Color) -> El {
     text(content).font(style).color(color)
+}
+
+pub fn tag_badge(tag: Tag, t: &Theme) -> El {
+    let color = t.tag_color(tag);
+    row()
+        .role("status")
+        .label(tag.label())
+        .h(16.0)
+        .px(5.0)
+        .center()
+        .radius(3.0)
+        .fill(t.k.alpha(color, 0.14))
+        .border(1.0, t.k.alpha(color, 0.55))
+        .child(
+            text(tag.short())
+                .font(t.semibold(t.text_xs))
+                .color(color)
+                .a11y_hidden(),
+        )
 }
 
 pub fn pane(key: impl Into<String>, title: El, extra: Option<El>, body: El, t: &Theme) -> El {

@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 use crate::{
     browser::{Browser, console::Console, table::TableView, tree::SchemaTree},
-    connection::{Connection, DbKind, PasswordStorage, Store},
+    connection::{Connection, DbKind, PasswordStorage, Store, Tag},
     keys::Command,
     workspace::{self, TabId, Workspace},
 };
@@ -44,11 +44,19 @@ impl TestConfig {
     }
 
     pub fn add_sample_db(&self, name: &str) -> PathBuf {
+        self.add_sample_db_tagged(name, name, None)
+    }
+
+    /// Builds the `sample` database as `<name>.db` and adds it as a connection tagged `tag`.
+    pub fn add_sample_db_tagged(&self, name: &str, sample: &str, tag: Option<Tag>) -> PathBuf {
         let data = self.dir.path().join("data");
         std::fs::create_dir_all(&data).expect("create temp data dir");
         let path = data.join(format!("{name}.db"));
-        build_sample_db(name, &path);
-        self.add_connection(sqlite_connection(name, &path));
+        build_sample_db(sample, &path);
+        self.add_connection(Connection {
+            tag,
+            ..sqlite_connection(name, &path)
+        });
         path
     }
 
@@ -100,6 +108,7 @@ pub fn sqlite_connection(name: &str, path: &Path) -> Connection {
     Connection {
         name: name.to_string(),
         kind: DbKind::Sqlite,
+        tag: None,
         host: String::new(),
         port: None,
         user: String::new(),

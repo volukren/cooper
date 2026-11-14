@@ -463,7 +463,7 @@ impl Highlighter {
     }
 }
 
-fn is_word(byte: u8) -> bool {
+pub(crate) fn is_word(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
 }
 
@@ -683,7 +683,7 @@ fn paired(previous: Option<&str>, name: &str, next: &str, call: bool) -> bool {
     ahead || behind
 }
 
-fn dollar_delimiter(rest: &[u8]) -> Option<usize> {
+pub(crate) fn dollar_delimiter(rest: &[u8]) -> Option<usize> {
     let tag = rest[1..].iter().take_while(|&&b| is_word(b)).count();
     let numbered = rest.get(1).is_some_and(u8::is_ascii_digit);
     (!numbered && rest.get(1 + tag) == Some(&b'$')).then_some(tag + 2)

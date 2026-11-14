@@ -382,6 +382,7 @@ mod tests {
         Connection {
             name: name.to_string(),
             kind: DbKind::Sqlite,
+            tag: None,
             host: String::new(),
             port: None,
             user: String::new(),
@@ -563,6 +564,7 @@ mod tests {
         let conn = Connection {
             name: "dev".into(),
             kind: DbKind::Postgres,
+            tag: None,
             host: "localhost".into(),
             port: Some(5432),
             user: "postgres".into(),

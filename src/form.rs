@@ -9,7 +9,7 @@ use rune_kit::{
 };
 
 use crate::{
-    connection::{self, Connection, DbKind, PasswordStorage},
+    connection::{self, Connection, DbKind, PasswordStorage, Tag},
     dialog::Dialog,
     icons, keys,
     theme::Theme,
@@ -19,6 +19,15 @@ use crate::{
 
 const KINDS: [DbKind; 3] = [DbKind::Postgres, DbKind::MySql, DbKind::Sqlite];
 const STORAGES: [PasswordStorage; 2] = [PasswordStorage::Keychain, PasswordStorage::Plain];
+const TAGS: [Option<Tag>; 5] = [
+    None,
+    Some(Tag::Dev),
+    Some(Tag::Test),
+    Some(Tag::Staging),
+    Some(Tag::Prod),
+];
+const PROD_HINT: &str =
+    "Scripts that change data or schema, and row edits, will ask for confirmation.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormValues {
@@ -30,6 +39,7 @@ pub struct FormValues {
     pub password: String,
     pub storage: PasswordStorage,
     pub database: String,
+    pub tag: Option<Tag>,
 }
 
 impl Default for FormValues {
@@ -44,6 +54,7 @@ impl Default for FormValues {
             password: String::new(),
             storage: PasswordStorage::default(),
             database: String::new(),
+            tag: None,
         }
     }
 }
@@ -59,6 +70,7 @@ impl FormValues {
             password: password.to_string(),
             storage: conn.password_storage,
             database: conn.database.clone(),
+            tag: conn.tag,
         }
     }
 }
@@ -103,6 +115,7 @@ pub fn validate(
         let conn = Connection {
             name: name.into(),
             kind: values.kind,
+            tag: values.tag,
             host: String::new(),
             port: None,
             user: String::new(),
@@ -124,6 +137,7 @@ pub fn validate(
     let conn = Connection {
         name: name.into(),
         kind: values.kind,
+        tag: values.tag,
         host: host.into(),
         port,
         user: values.user.trim().into(),
@@ -173,6 +187,8 @@ pub fn database_placeholder(kind: DbKind) -> &'static str {
 }
 
 const LABEL_WIDTH: f32 = 112.0;
+/// The space between a field's label and its control.
+const FIELD_GAP: f32 = 12.0;
 const CONTROL_WIDTH: f32 = 344.0;
 const FIELDS: [&str; 6] = ["name", "host", "port", "user", "password", "database"];
 
@@ -185,6 +201,7 @@ pub struct ConnectionForm {
     pub original: Option<Connection>,
     pub kind: DbKind,
     pub storage: PasswordStorage,
+    pub tag: Option<Tag>,
     pub name: TextEdit,
     pub host: TextEdit,
     pub port: TextEdit,
@@ -193,6 +210,7 @@ pub struct ConnectionForm {
     pub database: TextEdit,
     pub show_password: bool,
     pub kind_open: bool,
+    pub tag_open: bool,
     pub error: Option<String>,
     pub last_field: Cell<Option<&'static str>>,
 }
@@ -223,6 +241,7 @@ impl ConnectionForm {
             original,
             kind: values.kind,
             storage: values.storage,
+            tag: values.tag,
             name,
             host: TextEdit::new(values.host.clone()),
             port: TextEdit::new(values.port.clone()),
@@ -231,6 +250,7 @@ impl ConnectionForm {
             database: TextEdit::new(values.database.clone()),
             show_password: false,
             kind_open: false,
+            tag_open: false,
             error,
             last_field: Cell::new(Some("name")),
         }
@@ -246,6 +266,7 @@ impl ConnectionForm {
             password: self.password.text.clone(),
             storage: self.storage,
             database: self.database.text.clone(),
+            tag: self.tag,
         }
     }
 
@@ -274,6 +295,11 @@ impl ConnectionForm {
 
     pub fn set_storage(&mut self, storage: PasswordStorage) {
         self.storage = storage;
+        self.error = None;
+    }
+
+    pub fn set_tag(&mut self, tag: Option<Tag>) {
+        self.tag = tag;
         self.error = None;
     }
 
@@ -336,6 +362,18 @@ pub fn kind_labels() -> [&'static str; 3] {
 
 fn kind_of(label: &str) -> Option<DbKind> {
     KINDS.into_iter().find(|kind| kind.label() == label)
+}
+
+pub fn tag_label(tag: Option<Tag>) -> &'static str {
+    tag.map_or("None", Tag::label)
+}
+
+pub fn tag_labels() -> [&'static str; 5] {
+    TAGS.map(tag_label)
+}
+
+fn tag_of(label: &str) -> Option<Option<Tag>> {
+    TAGS.into_iter().find(|&tag| tag_label(tag) == label)
 }
 
 fn with_form(s: &mut Workspace, f: impl FnOnce(&mut ConnectionForm)) {
@@ -439,7 +477,7 @@ fn input(
 fn field_row(label: &str, control: El, t: &Theme) -> El {
     row()
         .w_full()
-        .gap(12.0)
+        .gap(FIELD_GAP)
         .center_y()
         .child(
             text(label.to_string())
@@ -448,6 +486,23 @@ fn field_row(label: &str, control: El, t: &Theme) -> El {
                 .w(LABEL_WIDTH),
         )
         .child(col().grow(1.0).min_w(0.0).child(control))
+}
+
+fn select_row(key: &'static str, select: El) -> El {
+    row()
+        .key(key)
+        .w_full()
+        .on_key(|s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| {
+            if keys::route(s, ev, tx) {
+                return true;
+            }
+            if ev.key == Key::Enter && ev.mods == rune::Mods::default() {
+                s.submit_form();
+                return true;
+            }
+            false
+        })
+        .child(select)
 }
 
 fn browse(s: &mut Workspace, tx: &mut Tx) {
@@ -502,7 +557,12 @@ pub fn dialog(
         .current(Some(form.kind.label()))
         .open(form.kind_open)
         .placement(Placement::BottomStart)
-        .on_toggle(|s: &mut Workspace| with_form(s, |f| f.kind_open = !f.kind_open))
+        .on_toggle(|s: &mut Workspace| {
+            with_form(s, |f| {
+                f.kind_open = !f.kind_open;
+                f.tag_open = false;
+            })
+        })
         .on_close(|s: &mut Workspace| with_form(s, |f| f.kind_open = false))
         .on_choose(|s: &mut Workspace, label: &str, _tx: &mut Tx| {
             let kind = kind_of(label);
@@ -514,20 +574,33 @@ pub fn dialog(
             });
         })
         .build(&t.k, &mut popups);
-    let kind = row()
-        .key("form-kind")
-        .w_full()
-        .on_key(|s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| {
-            if keys::route(s, ev, tx) {
-                return true;
-            }
-            if ev.key == Key::Enter && ev.mods == rune::Mods::default() {
-                s.submit_form();
-                return true;
-            }
-            false
+    let kind = select_row("form-kind", kind);
+
+    let tag = Select::new("form-tag", &tag_labels())
+        .appearance(SelectAppearance::Field)
+        .width(CONTROL_WIDTH)
+        .label("Environment")
+        .current(Some(tag_label(form.tag)))
+        .open(form.tag_open)
+        .placement(Placement::BottomStart)
+        .on_toggle(|s: &mut Workspace| {
+            with_form(s, |f| {
+                f.tag_open = !f.tag_open;
+                f.kind_open = false;
+            })
         })
-        .child(kind);
+        .on_close(|s: &mut Workspace| with_form(s, |f| f.tag_open = false))
+        .on_choose(|s: &mut Workspace, label: &str, _tx: &mut Tx| {
+            let tag = tag_of(label);
+            with_form(s, |f| {
+                f.tag_open = false;
+                if let Some(tag) = tag {
+                    f.set_tag(tag);
+                }
+            });
+        })
+        .build(&t.k, &mut popups);
+    let tag = select_row("form-tag", tag);
 
     let mut body = col()
         .key("connection-form")
@@ -633,7 +706,25 @@ pub fn dialog(
                     .key("browse"),
             )
     };
-    body = body.child(field_row(database_label(form.kind), database, t));
+    body = body
+        .child(field_row(database_label(form.kind), database, t))
+        .child(field_row("Environment", tag, t));
+    if form.tag == Some(Tag::Prod) {
+        body = body.child(
+            row()
+                .w_full()
+                .child(col().w(LABEL_WIDTH + FIELD_GAP))
+                .child(
+                    text(PROD_HINT)
+                        .key("form-tag-hint")
+                        .font(t.text_xs)
+                        .color(t.muted)
+                        .wrap()
+                        .grow(1.0)
+                        .min_w(0.0),
+                ),
+        );
+    }
 
     if let Some(error) = &form.error {
         body = body.child(
@@ -695,13 +786,17 @@ pub fn dialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{FormValues, is_port_text, port_after_kind_change, sanitize_paste, validate};
-    use crate::connection::{Connection, DbKind, PasswordStorage};
+    use super::{
+        FormValues, TAGS, is_port_text, port_after_kind_change, sanitize_paste, tag_label,
+        tag_labels, tag_of, validate,
+    };
+    use crate::connection::{Connection, DbKind, PasswordStorage, Tag};
 
     fn conn(name: &str, kind: DbKind) -> Connection {
         Connection {
             name: name.into(),
             kind,
+            tag: None,
             host: if kind.is_file_based() {
                 String::new()
             } else {
@@ -793,6 +888,7 @@ mod tests {
             password: "secret".into(),
             storage: PasswordStorage::Plain,
             database: "  /data/app.db ".into(),
+            tag: Some(Tag::Staging),
         };
         let (conn, password) = validate(&v, None, &[]).unwrap();
         assert_eq!(conn.name, "local");
@@ -800,7 +896,41 @@ mod tests {
         assert!(conn.host.is_empty() && conn.user.is_empty() && conn.password.is_empty());
         assert_eq!(conn.port, None);
         assert_eq!(conn.password_storage, PasswordStorage::Keychain);
+        assert_eq!(conn.tag, Some(Tag::Staging));
         assert_eq!(password, "");
+    }
+
+    #[test]
+    fn the_tag_round_trips_through_validation_and_edit() {
+        for kind in [DbKind::Postgres, DbKind::Sqlite] {
+            let v = FormValues {
+                kind,
+                name: "shop".into(),
+                database: "/tmp/shop.db".into(),
+                tag: Some(Tag::Prod),
+                ..FormValues::default()
+            };
+            let (conn, _) = validate(&v, None, &[]).unwrap();
+            assert_eq!(conn.tag, Some(Tag::Prod), "{kind:?}");
+            assert!(conn.asks_to_confirm());
+
+            let reopened = FormValues::from_connection(&conn, "");
+            assert_eq!(reopened.tag, Some(Tag::Prod));
+            let (again, _) =
+                validate(&reopened, Some("shop"), std::slice::from_ref(&conn)).unwrap();
+            assert_eq!(again.tag, Some(Tag::Prod), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn tag_labels_map_back_to_tags() {
+        for (label, tag) in tag_labels().into_iter().zip(TAGS) {
+            assert_eq!(tag_label(tag), label);
+            assert_eq!(tag_of(label), Some(tag));
+        }
+        assert_eq!(tag_of("Production"), Some(Some(Tag::Prod)));
+        assert_eq!(tag_of("None"), Some(None));
+        assert_eq!(tag_of("x"), None);
     }
 
     #[test]

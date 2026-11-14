@@ -1,7 +1,7 @@
 use rune::{Cx, El, Tx};
 
 use crate::{
-    browser::ddl,
+    browser::{self, confirm::Confirm, ddl},
     form::{self, FormDialog},
     help::{self, Help},
     keys::{Command, Ctx},
@@ -14,6 +14,7 @@ pub enum Dialog {
     DeleteConnection(String),
     Help(Box<Help>),
     Ddl(TabId),
+    Confirm(Box<Confirm>),
 }
 
 impl Dialog {
@@ -21,13 +22,15 @@ impl Dialog {
         match self {
             Dialog::Form(_) | Dialog::DeleteConnection(_) | Dialog::Help(_) => None,
             Dialog::Ddl(tab) => Some(*tab),
+            Dialog::Confirm(c) => Some(c.tab),
         }
     }
 
     pub fn contexts(&self, focused: Option<&str>, out: &mut Vec<Ctx>) {
         match self {
             Dialog::Help(help) => help.contexts(focused, out),
-            Dialog::Form(_) | Dialog::DeleteConnection(_) | Dialog::Ddl(_) => {}
+            Dialog::Form(_) | Dialog::DeleteConnection(_) | Dialog::Ddl(_) | Dialog::Confirm(_) => {
+            }
         }
     }
 }
@@ -41,6 +44,7 @@ pub fn view(s: &Workspace, t: &Theme, cx: &mut Cx<Workspace>, layer: &mut Vec<El
         Dialog::DeleteConnection(name) => workspace::delete_dialog(s, name, t, layer),
         Dialog::Help(help) => help::dialog(s, help, t, cx, layer),
         Dialog::Ddl(tab) => ddl::dialog(s, *tab, t, cx, layer),
+        Dialog::Confirm(c) => browser::confirm::dialog(s, c, t, layer),
     }
 }
 

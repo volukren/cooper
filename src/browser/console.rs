@@ -25,11 +25,15 @@ use self::{
     grid::{Grid, Selection, copy_cell, copy_row, data_column},
     syntax::{Palette, SqlLines},
 };
-use super::{Browser, Main, Pane};
+use super::{
+    Browser, Main, Pane,
+    confirm::{Confirm, Pending},
+};
 use crate::{
     connection::DbKind,
     db::ScriptResult,
-    icons,
+    dialog::Dialog,
+    guard, icons,
     keys::{self, Command, Ctx},
     theme::Theme,
     ui::{self, Scroll, ScrollY, Split},
@@ -417,11 +421,15 @@ pub fn contexts(b: &Browser, focused: Option<&str>, out: &mut Vec<Ctx>) {
 
 pub fn run(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
     use Command::*;
+    if cmd == RunScript {
+        let exists = s.browser_mut(tab).is_some();
+        run_script(s, tab, tx);
+        return exists;
+    }
     let Some(b) = s.browser_mut(tab) else {
         return false;
     };
     match cmd {
-        RunScript => run_script(b, tx),
         FocusResult => {
             if !focus_result(b, tx) {
                 hint(b, "No result yet · run the script with ⌘⏎ or F5");
@@ -464,15 +472,46 @@ fn result_text_selected(tx: &Tx) -> bool {
     })
 }
 
-fn run_script(b: &mut Browser, tx: &mut Tx) {
+const ALREADY_RUNNING: &str = "A script is already running · Esc cancels it";
+
+/// Runs the script in the editor, or only its selection. On a connection tagged Production a
+/// script that may change data or schema opens the confirmation prompt instead.
+fn run_script(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
+    let Some((b, dialog)) = s.browser_and_dialog(tab) else {
+        return;
+    };
     if b.console.run.is_some() {
-        return hint(b, "A script is already running · Esc cancels it");
+        return hint(b, ALREADY_RUNNING);
     }
     let Some(sql) = runnable(&b.console.sql.text, b.console.sql.selected()) else {
         return hint(b, "Nothing to run: the editor is empty");
     };
     clear_status(b);
-    let id = b.session.run_script(&sql, SCRIPT_ROW_LIMIT);
+    if b.connection.asks_to_confirm() {
+        let statements = guard::writes(&sql, b.connection.kind);
+        if !statements.is_empty() {
+            *dialog = Some(Dialog::Confirm(Box::new(Confirm {
+                tab,
+                connection: b.connection.name.clone(),
+                pending: Pending::Script(sql),
+                statements,
+            })));
+            return;
+        }
+    }
+    start_script(b, &sql, tx);
+}
+
+/// Runs `sql` exactly as it was confirmed, not what the editor holds now.
+pub(super) fn run_confirmed(b: &mut Browser, sql: String, tx: &mut Tx) {
+    if b.console.run.is_some() {
+        return hint(b, ALREADY_RUNNING);
+    }
+    start_script(b, &sql, tx);
+}
+
+fn start_script(b: &mut Browser, sql: &str, tx: &mut Tx) {
+    let id = b.session.run_script(sql, SCRIPT_ROW_LIMIT);
     start(b, id, tx);
 }
 
@@ -1112,8 +1151,8 @@ fn editor_pane(b: &Browser, tab: TabId, t: &Theme) -> El {
                     .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
                         if let Some(b) = s.browser_mut(tab) {
                             b.clear_status();
-                            run_script(b, tx);
                         }
+                        run_script(s, tab, tx);
                     })
                     .build(&t.k)
                     .key("run-script"),

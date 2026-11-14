@@ -114,6 +114,10 @@ const SECTIONS: &[Section] = &[
             ),
             b(&[T("Type menu")], "Choose PostgreSQL, MySQL or SQLite"),
             b(
+                &[T("Environment menu")],
+                "Tag the connection: Development, Testing, Staging or Production",
+            ),
+            b(
                 &[T("Store password")],
                 "Keep the password in the system keychain or in the config",
             ),
@@ -209,6 +213,10 @@ const SECTIONS: &[Section] = &[
                 "Save the changed values (only if the row is still there)",
             ),
             b(&[K("escape")], "Throw the changes away"),
+            b(
+                &[T("Production")],
+                "Saving asks to confirm first on a connection tagged Production",
+            ),
         ],
     },
     Section {
@@ -217,6 +225,11 @@ const SECTIONS: &[Section] = &[
             b(
                 &[K("cmd-enter"), K("f5")],
                 "Run the script, or only the selected text (editor or result)",
+            ),
+            b(
+                &[T("Production")],
+                "A script that changes data or schema asks to confirm first on a connection \
+                 tagged Production (SELECT, SHOW, EXPLAIN… run directly)",
             ),
             b(&[K("cmd-."), K("escape")], "Cancel the running script"),
             b(
@@ -242,6 +255,23 @@ const SECTIONS: &[Section] = &[
             b(
                 &[K("space"), T("Double-click")],
                 "Show the selected row in full (result)",
+            ),
+        ],
+    },
+    Section {
+        title: "Production prompt",
+        bindings: &[
+            b(
+                &[K("escape"), T("Cancel")],
+                "Close without running or saving anything (Cancel has the focus)",
+            ),
+            b(
+                &[K("tab"), K("space")],
+                "Move to the confirm button and press it; Enter never confirms",
+            ),
+            b(
+                &[T("no WHERE")],
+                "Marks an UPDATE or DELETE that changes every row of its table",
             ),
         ],
     },

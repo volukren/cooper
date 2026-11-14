@@ -13,6 +13,7 @@ fn connection(kind: DbKind, port: Option<u16>, user: &str, database: &str) -> Co
     Connection {
         name: "test".to_string(),
         kind,
+        tag: None,
         host: if kind.is_file_based() {
             String::new()
         } else {

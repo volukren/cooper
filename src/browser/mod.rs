@@ -1,3 +1,4 @@
+pub mod confirm;
 pub mod console;
 pub mod ddl;
 pub mod table;
@@ -23,6 +24,9 @@ use crate::{
 };
 
 use self::{console::Console, ddl::DdlView, table::TableView, tree::SchemaTree};
+
+const PROD_BANNER: &str =
+    "Production — scripts that change data or schema and row edits ask for confirmation";
 
 pub enum Polled {
     Idle,
@@ -531,6 +535,7 @@ pub fn view(
                 b.clear_status();
             }
         })
+        .children(prod_banner(b, t))
         .child(
             row()
                 .key("browser-split")
@@ -552,6 +557,23 @@ pub fn view(
         .w_full()
         .min_h(0.0)
         .child(browser)
+}
+
+fn prod_banner(b: &Browser, t: &Theme) -> Option<El> {
+    b.connection.asks_to_confirm().then(|| {
+        row()
+            .key("prod-banner")
+            .label(PROD_BANNER)
+            .h(26.0)
+            .w_full()
+            .px(12.0)
+            .gap(8.0)
+            .center_y()
+            .fill(t.k.alpha(t.danger, 0.12))
+            .border_sides([0.0, 0.0, 1.0, 0.0], t.k.alpha(t.danger, 0.45))
+            .child(ui::icon_el(&icons::TRIANGLE_ALERT, 14.0, t.danger))
+            .child(ui::label(PROD_BANNER, t.semibold(t.text_sm), t.danger).truncate())
+    })
 }
 
 fn main_switch(b: &Browser, t: &Theme) -> El {

@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use rune::{Color, Family, Span, TextStyle, oklch};
 use rune_kit::Kit;
 
-use crate::highlight::Token;
+use crate::{connection::Tag, highlight::Token};
 
 pub const FAMILIES: (&str, &str) = ("Inter", "ui-monospace, Menlo");
 
@@ -39,6 +39,8 @@ pub struct Theme {
     pub cyan: Color,
     pub green: Color,
     pub magenta: Color,
+    pub orange: Color,
+    pub violet: Color,
     pub text: TextStyle,
     pub text_sm: TextStyle,
     pub text_xs: TextStyle,
@@ -113,6 +115,8 @@ impl Theme {
             cyan: hue(dark, 200.0),
             green: hue(dark, 145.0),
             magenta: hue(dark, 330.0),
+            orange: hue(dark, 55.0),
+            violet: hue(dark, 295.0),
             text: TextStyle::new(13.0, 400.0).lh(18.0),
             text_sm: TextStyle::new(12.0, 400.0).lh(16.0),
             text_xs: TextStyle::new(11.0, 400.0).lh(14.0),
@@ -140,6 +144,15 @@ impl Theme {
         TextStyle {
             weight: 500.0,
             ..style
+        }
+    }
+
+    pub fn tag_color(&self, tag: Tag) -> Color {
+        match tag {
+            Tag::Dev => self.green,
+            Tag::Test => self.violet,
+            Tag::Staging => self.orange,
+            Tag::Prod => self.danger,
         }
     }
 

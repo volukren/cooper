@@ -100,7 +100,7 @@ impl Workspace {
             Ok(connections) => (connections, None),
             Err(err) => (Vec::new(), Some(format!("{err:#}"))),
         };
-        let workspace = Self {
+        Self {
             home: Home::new(store, connections),
             load_error,
             scratch: TextEdit::new(""),
@@ -120,8 +120,7 @@ impl Workspace {
             hold_connecting: false,
             next_tab: 1,
             next_toast: 1,
-        };
-        workspace
+        }
     }
 
     pub fn is_dark(&self) -> bool {
@@ -862,7 +861,8 @@ fn tab_strip(s: &Workspace, t: &Theme) -> El {
         let lead = if tab.is_connecting() {
             ui::spinner(12.0, t.foreground, t)
         } else {
-            ui::icon_el(&icons::DATABASE, 14.0, t.muted)
+            let color = tab.connection.tag.map_or(t.muted, |tag| t.tag_color(tag));
+            ui::icon_el(&icons::DATABASE, 14.0, color)
         };
         let close = rune_kit::IconButton::new(&icons::CLOSE)
             .variant(rune_kit::IconButtonVariant::Ghost)
@@ -884,6 +884,11 @@ fn tab_strip(s: &Workspace, t: &Theme) -> El {
             t,
         )
         .help(crate::db::render_text(tab.name()))
+        .children(
+            tab.connection
+                .tag
+                .map(|tag| ui::tag_badge(tag, t).key(format!("tab-{}-tag", id.0))),
+        )
         .children(model::tab_shortcut(index).map(|hint| ui::label(hint, t.text_xs, t.muted)))
         .child(close)
         .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
