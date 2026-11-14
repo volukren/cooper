@@ -5,6 +5,8 @@ pub mod table;
 pub mod tree;
 
 #[cfg(test)]
+mod read_only_tests;
+#[cfg(test)]
 mod ui_tests;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
@@ -27,6 +29,9 @@ use self::{console::Console, ddl::DdlView, table::TableView, tree::SchemaTree};
 
 const PROD_BANNER: &str =
     "Production — scripts that change data or schema and row edits ask for confirmation";
+const READ_ONLY_BANNER: &str =
+    "Read-only — scripts that change data or schema are not run, and rows can't be edited";
+pub const READ_ONLY_EDIT: &str = "This connection is read-only: rows can't be edited";
 
 pub enum Polled {
     Idle,
@@ -544,7 +549,7 @@ pub fn view(
                 b.clear_status();
             }
         })
-        .children(prod_banner(b, t))
+        .children(banner(b, t))
         .child(
             row()
                 .key("browser-split")
@@ -568,21 +573,28 @@ pub fn view(
         .child(browser)
 }
 
-fn prod_banner(b: &Browser, t: &Theme) -> Option<El> {
-    b.connection.asks_to_confirm().then(|| {
+fn banner(b: &Browser, t: &Theme) -> Option<El> {
+    let (key, message, glyph, color) = if b.connection.read_only {
+        ("read-only-banner", READ_ONLY_BANNER, &icons::LOCK, t.blue)
+    } else if b.connection.asks_to_confirm() {
+        ("prod-banner", PROD_BANNER, &icons::TRIANGLE_ALERT, t.danger)
+    } else {
+        return None;
+    };
+    Some(
         row()
-            .key("prod-banner")
-            .label(PROD_BANNER)
+            .key(key)
+            .label(message)
             .h(26.0)
             .w_full()
             .px(12.0)
             .gap(8.0)
             .center_y()
-            .fill(t.k.alpha(t.danger, 0.12))
-            .border_sides([0.0, 0.0, 1.0, 0.0], t.k.alpha(t.danger, 0.45))
-            .child(ui::icon_el(&icons::TRIANGLE_ALERT, 14.0, t.danger))
-            .child(ui::label(PROD_BANNER, t.semibold(t.text_sm), t.danger).truncate())
-    })
+            .fill(t.k.alpha(color, 0.12))
+            .border_sides([0.0, 0.0, 1.0, 0.0], t.k.alpha(color, 0.45))
+            .child(ui::icon_el(glyph, 14.0, color))
+            .child(ui::label(message, t.semibold(t.text_sm), color).truncate()),
+    )
 }
 
 fn main_switch(b: &Browser, t: &Theme) -> El {

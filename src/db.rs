@@ -11,7 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::connection::{Connection, DbKind};
+use crate::{
+    connection::{Connection, DbKind},
+    guard,
+};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 10 });
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
@@ -22,6 +25,7 @@ const CANCEL_RETRY: Duration = Duration::from_millis(50);
 const CANCEL_ATTEMPTS: usize = 40;
 const SPARE_RETRIES: u32 = 2;
 const SQLITE_PROGRESS_OPS: i32 = 1000;
+const READ_ONLY_EDIT: &str = "this connection is read-only (nothing was saved)";
 pub const MAX_CELL_CHARS: usize = 500;
 pub const MAX_FULL_BYTES: usize = 64 * 1024;
 const BYTES_PREVIEW: usize = 16;
@@ -546,7 +550,7 @@ impl Session {
                 password.clone(),
                 response_tx.clone(),
                 announce,
-                writable,
+                writable && !conn.read_only,
             )
         };
         Session {
@@ -738,6 +742,11 @@ impl Worker {
                         id: Some(request.id()),
                         message: "cancelled before it started".to_string(),
                     }
+                } else if let Some(message) = refusal(&self.conn, &request) {
+                    Response::Error {
+                        id: Some(request.id()),
+                        message,
+                    }
                 } else {
                     self.serve(&mut backend, &request)
                 };
@@ -862,8 +871,34 @@ fn open(
         DbKind::MySql => {
             Box::new(MyBackend::connect(conn, password).map_err(|failure| failure.message)?)
         }
-        DbKind::Sqlite => Box::new(SqliteBackend::open(&conn.database, halt, writable)?),
+        DbKind::Sqlite => Box::new(SqliteBackend::open(
+            &conn.database,
+            halt,
+            writable,
+            conn.read_only,
+        )?),
     })
+}
+
+fn refusal(conn: &Connection, request: &Request) -> Option<String> {
+    if !conn.read_only {
+        return None;
+    }
+    match request {
+        Request::RunScript { sql, .. } => guard::refusal(sql, conn.kind),
+        Request::UpdateRow { .. } => Some(READ_ONLY_EDIT.to_string()),
+        _ => None,
+    }
+}
+
+fn read_only_failure(failure: Failure) -> Failure {
+    Failure {
+        message: format!(
+            "could not make the session read-only, so it was not opened: {}",
+            failure.message
+        ),
+        cancelled: failure.cancelled,
+    }
 }
 
 fn run(backend: &mut dyn Backend, request: &Request) -> Result<Response, Failure> {
@@ -1287,6 +1322,11 @@ impl PgBackend {
             .block_on(config.connect(tls.clone()))
             .map_err(pg_error)?;
         runtime.spawn(connection);
+        if conn.read_only {
+            runtime
+                .block_on(client.batch_execute(PG_READ_ONLY))
+                .map_err(|err| read_only_failure(pg_error(err)))?;
+        }
         Ok(Self {
             client,
             runtime,
@@ -1431,6 +1471,8 @@ impl PgBackend {
         Ok(rows.into_iter().flatten().collect())
     }
 }
+
+const PG_READ_ONLY: &str = "SET default_transaction_read_only = on";
 
 const PG_RELATION: &str = "\
     SELECT c.oid::text, c.relkind::text, c.relpersistence::text, \
@@ -1804,8 +1846,15 @@ impl MyBackend {
             }
             other => other,
         };
+        let mut connected = connected.map_err(my_error)?;
+        if conn.read_only {
+            use mysql::prelude::Queryable;
+            connected
+                .query_drop(MYSQL_READ_ONLY)
+                .map_err(|err| read_only_failure(my_error(err)))?;
+        }
         Ok(Self {
-            conn: connected.map_err(my_error)?,
+            conn: connected,
             opts: used,
             database: conn.database.clone(),
         })
@@ -1825,6 +1874,7 @@ impl MyBackend {
     }
 }
 
+const MYSQL_READ_ONLY: &str = "SET SESSION TRANSACTION READ ONLY";
 const MYSQL_QUERY_INTERRUPTED: u16 = 1317;
 
 fn my_error(err: mysql::Error) -> Failure {
@@ -2183,7 +2233,12 @@ struct SqliteBackend {
 }
 
 impl SqliteBackend {
-    fn open(path: &str, halt: Arc<AtomicBool>, writable: bool) -> Result<Self, String> {
+    fn open(
+        path: &str,
+        halt: Arc<AtomicBool>,
+        writable: bool,
+        read_only: bool,
+    ) -> Result<Self, String> {
         use rusqlite::OpenFlags;
         if path.trim().is_empty() {
             return Err("no database file specified".to_string());
@@ -2193,20 +2248,19 @@ impl SqliteBackend {
             return Err(format!("{}: no such database file", path.display()));
         }
         let base = OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let mut conn =
-            rusqlite::Connection::open_with_flags(&path, base | OpenFlags::SQLITE_OPEN_READ_WRITE)
-                .or_else(|_| {
-                    rusqlite::Connection::open_with_flags(
-                        &path,
-                        base | OpenFlags::SQLITE_OPEN_READ_ONLY,
-                    )
-                })
-                .map_err(|err| format!("{}: {err}", path.display()))?;
+        let open = |access| rusqlite::Connection::open_with_flags(&path, base | access);
+        let opened = if read_only {
+            open(OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            open(OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .or_else(|_| open(OpenFlags::SQLITE_OPEN_READ_ONLY))
+        };
+        let mut conn = opened.map_err(|err| format!("{}: {err}", path.display()))?;
         let _ = conn.busy_timeout(Duration::from_secs(5));
         let watch = move || halt.load(Ordering::Relaxed);
         conn.progress_handler(SQLITE_PROGRESS_OPS, Some(watch))
             .map_err(|err| format!("{}: {err}", path.display()))?;
-        let guarded = if writable {
+        let guarded = if writable && !read_only {
             Ok(())
         } else {
             conn.execute_batch("PRAGMA query_only = ON")

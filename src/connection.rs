@@ -114,12 +114,18 @@ impl Tag {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub name: String,
     pub kind: DbKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<Tag>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +147,7 @@ impl fmt::Debug for Connection {
             .field("name", &self.name)
             .field("kind", &self.kind)
             .field("tag", &self.tag)
+            .field("read_only", &self.read_only)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &self.user)
@@ -183,10 +190,11 @@ struct ConnectionsFile {
 }
 
 const CONNECTIONS_KEY: &str = "connection";
-const MANAGED_KEYS: [&str; 9] = [
+const MANAGED_KEYS: [&str; 10] = [
     "name",
     "kind",
     "tag",
+    "read_only",
     "host",
     "port",
     "user",
@@ -576,6 +584,7 @@ database = "app"
             name: "archive".into(),
             kind: DbKind::Sqlite,
             tag: None,
+            read_only: false,
             host: String::new(),
             port: None,
             user: String::new(),
@@ -617,6 +626,7 @@ database = "app"
             name: "x".into(),
             kind: DbKind::MySql,
             tag: None,
+            read_only: false,
             host: "localhost".into(),
             port: Some(3306),
             user: "root".into(),
@@ -654,6 +664,7 @@ password = "s3cret"
             name: "dev".into(),
             kind: DbKind::Postgres,
             tag: None,
+            read_only: false,
             host: "localhost".into(),
             port: None,
             user: "postgres".into(),
@@ -835,5 +846,74 @@ password = "s3cret"
         ));
         let err = t.store.load().unwrap_err();
         assert!(format!("{err:?}").contains("qa"), "{err:?}");
+    }
+
+    #[test]
+    fn read_only_is_written_only_when_set_and_round_trips() {
+        let t = TempStore::new(None);
+        t.store.append(&plain_dev()).unwrap();
+        let data = t.contents();
+        assert!(!data.contains("read_only"), "{data}");
+        assert!(!t.store.load().unwrap()[0].read_only);
+
+        let t = TempStore::new(None);
+        let conn = Connection {
+            read_only: true,
+            ..plain_dev()
+        };
+        t.store.append(&conn).unwrap();
+        let data = t.contents();
+        assert!(data.contains("read_only = true"), "{data}");
+        assert!(t.store.load().unwrap()[0].read_only);
+    }
+
+    #[test]
+    fn configs_without_read_only_load_writable() {
+        let t = TempStore::new(Some(TWO));
+        let loaded = t.store.load().unwrap();
+        assert!(loaded.iter().all(|c| !c.read_only), "{loaded:?}");
+        assert_eq!(t.contents(), TWO);
+    }
+
+    #[test]
+    fn update_adds_and_removes_read_only_in_place() {
+        let t = TempStore::new(Some(PLAIN));
+        let mut conn = Connection {
+            read_only: true,
+            ..plain_dev()
+        };
+        t.store.update("dev", &conn).unwrap();
+        let data = t.contents();
+        assert!(data.contains("read_only = true"), "{data}");
+        assert!(
+            data.contains("password_storage = \"plain\" # local only"),
+            "{data}"
+        );
+        assert!(t.store.load().unwrap()[0].read_only);
+
+        conn.read_only = false;
+        t.store.update("dev", &conn).unwrap();
+        assert_eq!(t.contents(), PLAIN);
+    }
+
+    #[test]
+    fn a_hand_written_read_only_false_loads_writable_and_other_values_fail() {
+        let entry = "[[connection]]\nname = \"x\"\nkind = \"sqlite\"\ndatabase = \"x.db\"\n";
+        let t = TempStore::new(Some(&format!("{entry}read_only = false\n")));
+        assert!(!t.store.load().unwrap()[0].read_only);
+
+        let t = TempStore::new(Some(&format!("{entry}read_only = \"yes\"\n")));
+        let err = t.store.load().unwrap_err();
+        assert!(format!("{err:?}").contains("yes"), "{err:?}");
+    }
+
+    #[test]
+    fn debug_output_shows_read_only() {
+        let conn = Connection {
+            read_only: true,
+            ..plain_dev()
+        };
+        let text = format!("{conn:?}");
+        assert!(text.contains("read_only: true"), "{text}");
     }
 }

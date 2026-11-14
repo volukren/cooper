@@ -14,6 +14,7 @@ fn connection(kind: DbKind, port: Option<u16>, user: &str, database: &str) -> Co
         name: "test".to_string(),
         kind,
         tag: None,
+        read_only: false,
         host: if kind.is_file_based() {
             String::new()
         } else {
@@ -1001,15 +1002,165 @@ fn sqlite_edits_do_not_join_a_transaction_the_console_left_open() {
 #[test]
 fn sqlite_is_opened_read_only_for_queries() {
     let (_dir, path) = seeded_sqlite();
-    let backend = SqliteBackend::open(path.to_str().unwrap(), Arc::default(), false).unwrap();
+    let backend =
+        SqliteBackend::open(path.to_str().unwrap(), Arc::default(), false, false).unwrap();
     let err = backend
         .conn
         .execute("DELETE FROM \"Users\"", [])
         .unwrap_err();
     assert!(err.to_string().contains("readonly"), "{err}");
 
-    let scripts = SqliteBackend::open(path.to_str().unwrap(), Arc::default(), true).unwrap();
+    let scripts = SqliteBackend::open(path.to_str().unwrap(), Arc::default(), true, false).unwrap();
     assert_eq!(scripts.conn.execute("DELETE FROM no_pk", []).unwrap(), 3);
+}
+
+fn read_only(conn: Connection) -> Connection {
+    Connection {
+        read_only: true,
+        ..conn
+    }
+}
+
+fn sqlite_count(path: &std::path::Path, table: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_read_only_sqlite_session_browses_and_reads_but_refuses_writes() {
+    let (_dir, path) = seeded_sqlite();
+    let session = Session::spawn(read_only(sqlite_connection(&path)), None);
+    assert!(matches!(wait(&session), Response::Connected { .. }));
+
+    assert_eq!(count(&session, "main", USERS), 250);
+    assert_eq!(page(&session, "main", "no_pk", 0, 10).rows.len(), 3);
+    assert!(ddl(&session, "main", USERS).unwrap().sql.contains("CREATE"));
+    let read = script(&session, "SELECT v FROM no_pk ORDER BY v; SELECT 1", 10).unwrap();
+    assert_eq!(read.statements, 2);
+    script(&session, "BEGIN; SELECT 1; COMMIT", 10).unwrap();
+
+    for sql in [
+        "DELETE FROM no_pk",
+        "SELECT 1; INSERT INTO no_pk VALUES ('d')",
+        "CREATE TABLE made (id INTEGER)",
+        "PRAGMA query_only = OFF; DELETE FROM no_pk",
+        "ATTACH DATABASE ':memory:' AS other",
+        "VACUUM",
+    ] {
+        let refused = script(&session, sql, 10).unwrap_err();
+        assert!(refused.contains("read-only"), "{sql}: {refused}");
+        assert!(refused.contains("Nothing was run"), "{sql}: {refused}");
+    }
+    let named = script(&session, "SELECT 1; DELETE FROM no_pk", 10).unwrap_err();
+    assert!(named.ends_with("\n\nDELETE FROM no_pk"), "{named}");
+    assert_eq!(sqlite_count(&path, "no_pk"), 3);
+    assert_eq!(sqlite_count(&path, "sqlite_master WHERE name = 'made'"), 0);
+
+    let edit = update(
+        &session,
+        row_update(USERS, &[("id", "1")], &[("name", Some("edited"))]),
+    )
+    .unwrap_err();
+    assert_eq!(edit, READ_ONLY_EDIT);
+    assert_eq!(sqlite_count(&path, "\"Users\" WHERE name = 'edited'"), 0);
+
+    script(&session, "SELECT 1", 10).unwrap();
+}
+
+#[test]
+fn a_read_only_sqlite_session_reads_a_wal_database_another_connection_writes() {
+    let (_dir, path) = seeded_sqlite();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer
+        .execute("INSERT INTO no_pk VALUES ('in the wal')", [])
+        .unwrap();
+
+    let session = Session::spawn(read_only(sqlite_connection(&path)), None);
+    assert!(matches!(wait(&session), Response::Connected { .. }));
+    assert_eq!(count(&session, "main", "no_pk"), 4);
+    writer
+        .execute("INSERT INTO no_pk VALUES ('later')", [])
+        .unwrap();
+    let read = script(&session, "SELECT COUNT(*) FROM no_pk", 10).unwrap();
+    assert_eq!(read.rows, cells(&[&[Some("5")]]));
+    assert!(script(&session, "DELETE FROM no_pk", 10).is_err());
+    drop(session);
+    drop(writer);
+    assert_eq!(sqlite_count(&path, "no_pk"), 5);
+}
+
+#[test]
+fn a_read_only_sqlite_backend_cannot_write_even_past_the_guard() {
+    let (_dir, path) = seeded_sqlite();
+    for writable in [true, false] {
+        let mut backend =
+            SqliteBackend::open(path.to_str().unwrap(), Arc::default(), writable, true).unwrap();
+        for sql in [
+            "DELETE FROM no_pk",
+            "PRAGMA query_only = OFF; DELETE FROM no_pk",
+            "CREATE TABLE made (id INTEGER)",
+        ] {
+            let err = backend.script(sql, 10).unwrap_err().message;
+            assert!(err.contains("readonly"), "{writable} {sql}: {err}");
+        }
+        let err = backend
+            .update_row(&row_update(
+                USERS,
+                &[("id", "1")],
+                &[("name", Some("edited"))],
+            ))
+            .unwrap_err()
+            .message;
+        assert!(err.contains("readonly"), "{writable}: {err}");
+        assert_eq!(backend.count("main", "no_pk").unwrap(), 3);
+    }
+    assert_eq!(sqlite_count(&path, "no_pk"), 3);
+    assert_eq!(sqlite_count(&path, "\"Users\" WHERE name = 'edited'"), 0);
+}
+
+#[test]
+fn only_read_only_connections_refuse_requests() {
+    let (_dir, path) = seeded_sqlite();
+    let writable = sqlite_connection(&path);
+    let locked = read_only(writable.clone());
+    let write = Request::RunScript {
+        id: 1,
+        sql: "DELETE FROM no_pk".into(),
+        limit: 10,
+    };
+    let read = Request::RunScript {
+        id: 2,
+        sql: "SELECT * FROM no_pk".into(),
+        limit: 10,
+    };
+    let edit = Request::UpdateRow {
+        id: 3,
+        update: row_update(USERS, &[("id", "1")], &[("name", Some("x"))]),
+    };
+    let browse = [
+        Request::ListSchemas { id: 4 },
+        Request::CountRows {
+            id: 5,
+            schema: "main".into(),
+            table: USERS.into(),
+        },
+    ];
+    for request in [&write, &read, &edit].into_iter().chain(&browse) {
+        assert_eq!(refusal(&writable, request), None, "{request:?}");
+    }
+    assert!(refusal(&locked, &write).unwrap().contains("read-only"));
+    assert_eq!(refusal(&locked, &edit).as_deref(), Some(READ_ONLY_EDIT));
+    for request in std::iter::once(&read).chain(&browse) {
+        assert_eq!(refusal(&locked, request), None, "{request:?}");
+    }
 }
 
 #[test]
@@ -2336,4 +2487,151 @@ fn the_waker_runs_after_each_response() {
         .recv_timeout(Duration::from_secs(10))
         .expect("the count lane wakes too");
     assert!(matches!(session.try_recv(), Some(Response::Count { id: got, .. }) if got == id));
+}
+
+#[test]
+#[ignore = "needs a throwaway PostgreSQL server"]
+fn postgres_read_only_session_cannot_write() {
+    let conn = connection(
+        DbKind::Postgres,
+        Some(env_port("COOPER_TEST_PG_PORT")),
+        "postgres",
+        "postgres",
+    );
+    let password = env_password();
+    let setup = PgBackend::connect(&conn, Some(&password)).unwrap();
+    pg_batch(
+        &setup,
+        "DROP SCHEMA IF EXISTS cooper_ro CASCADE;
+         CREATE SCHEMA cooper_ro;
+         CREATE TABLE cooper_ro.t (id integer PRIMARY KEY, v text);
+         INSERT INTO cooper_ro.t VALUES (1, 'one'), (2, 'two');
+         CREATE FUNCTION cooper_ro.sneaky() RETURNS integer LANGUAGE sql
+           AS 'INSERT INTO cooper_ro.t VALUES (9, ''sneaked'') RETURNING id';",
+    );
+    let rows = |setup: &mut PgBackend| setup.count("cooper_ro", "t").unwrap();
+
+    let locked = read_only(conn.clone());
+    let session = Session::spawn(locked.clone(), Some(password.clone()));
+    assert!(matches!(wait(&session), Response::Connected { .. }));
+    assert_eq!(count(&session, "cooper_ro", "t"), 2);
+    assert_eq!(page(&session, "cooper_ro", "t", 0, 10).rows.len(), 2);
+    let read = script(&session, "SELECT v FROM cooper_ro.t ORDER BY id", 10).unwrap();
+    assert_eq!(read.rows, cells(&[&[Some("one")], &[Some("two")]]));
+    script(&session, "BEGIN; SELECT 1; COMMIT", 10).unwrap();
+
+    for sql in [
+        "DELETE FROM cooper_ro.t",
+        "CREATE TABLE cooper_ro.made (id integer)",
+        "SET default_transaction_read_only = off; DELETE FROM cooper_ro.t",
+        "BEGIN READ WRITE; DELETE FROM cooper_ro.t; COMMIT",
+        "SELECT set_config('default_transaction_read_only', 'off', false)",
+    ] {
+        let refused = script(&session, sql, 10).unwrap_err();
+        assert!(refused.contains("Nothing was run"), "{sql}: {refused}");
+    }
+    let sneaky = script(&session, "SELECT cooper_ro.sneaky()", 10).unwrap_err();
+    assert!(sneaky.contains("read-only transaction"), "{sneaky}");
+    let edit = update(
+        &session,
+        RowUpdate {
+            schema: "cooper_ro".into(),
+            table: "t".into(),
+            key: vec![("id".into(), "1".into())],
+            values: vec![("v".into(), Some("edited".into()))],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(edit, READ_ONLY_EDIT);
+    drop(session);
+
+    let mut backend = PgBackend::connect(&locked, Some(&password)).unwrap();
+    for sql in [
+        "DELETE FROM cooper_ro.t",
+        "INSERT INTO cooper_ro.t VALUES (3, 'three')",
+        "CREATE TABLE cooper_ro.made (id integer)",
+        "DROP TABLE cooper_ro.t",
+        "TRUNCATE cooper_ro.t",
+        "SELECT cooper_ro.sneaky()",
+    ] {
+        let err = backend.script(sql, 10).unwrap_err().message;
+        assert!(err.contains("read-only transaction"), "{sql}: {err}");
+    }
+    assert_eq!(backend.count("cooper_ro", "t").unwrap(), 2);
+    drop(backend);
+
+    let mut setup = setup;
+    assert_eq!(rows(&mut setup), 2);
+    pg_batch(&setup, "DROP SCHEMA cooper_ro CASCADE");
+}
+
+#[test]
+#[ignore = "needs a throwaway MySQL server"]
+fn mysql_read_only_session_cannot_write() {
+    use mysql::prelude::Queryable;
+    let conn = connection(
+        DbKind::MySql,
+        Some(env_port("COOPER_TEST_MYSQL_PORT")),
+        "root",
+        "",
+    );
+    let password = env_password();
+    let mut setup = MyBackend::connect(&conn, Some(&password)).unwrap();
+    for sql in [
+        "DROP DATABASE IF EXISTS cooper_ro",
+        "CREATE DATABASE cooper_ro",
+        "CREATE TABLE cooper_ro.t (id INT PRIMARY KEY, v VARCHAR(20))",
+        "INSERT INTO cooper_ro.t VALUES (1, 'one'), (2, 'two')",
+    ] {
+        setup.conn.query_drop(sql).unwrap();
+    }
+
+    let locked = read_only(conn.clone());
+    let session = Session::spawn(locked.clone(), Some(password.clone()));
+    assert!(matches!(wait(&session), Response::Connected { .. }));
+    assert_eq!(count(&session, "cooper_ro", "t"), 2);
+    assert_eq!(page(&session, "cooper_ro", "t", 0, 10).rows.len(), 2);
+    let read = script(&session, "SELECT v FROM cooper_ro.t ORDER BY id", 10).unwrap();
+    assert_eq!(read.rows, cells(&[&[Some("one")], &[Some("two")]]));
+    script(&session, "START TRANSACTION; SELECT 1; COMMIT", 10).unwrap();
+
+    for sql in [
+        "DELETE FROM cooper_ro.t",
+        "CREATE TABLE cooper_ro.made (id INT)",
+        "SET SESSION TRANSACTION READ WRITE; DELETE FROM cooper_ro.t",
+        "SET @@session.transaction_read_only = 0",
+        "START TRANSACTION READ WRITE; DELETE FROM cooper_ro.t; COMMIT",
+    ] {
+        let refused = script(&session, sql, 10).unwrap_err();
+        assert!(refused.contains("Nothing was run"), "{sql}: {refused}");
+    }
+    let edit = update(
+        &session,
+        RowUpdate {
+            schema: "cooper_ro".into(),
+            table: "t".into(),
+            key: vec![("id".into(), "1".into())],
+            values: vec![("v".into(), Some("edited".into()))],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(edit, READ_ONLY_EDIT);
+    drop(session);
+
+    let mut backend = MyBackend::connect(&locked, Some(&password)).unwrap();
+    for sql in [
+        "DELETE FROM cooper_ro.t",
+        "INSERT INTO cooper_ro.t VALUES (3, 'three')",
+        "UPDATE cooper_ro.t SET v = 'x'",
+        "CREATE TABLE cooper_ro.made (id INT)",
+        "DROP TABLE cooper_ro.t",
+    ] {
+        let err = backend.script(sql, 10).unwrap_err().message;
+        assert!(err.to_lowercase().contains("read only"), "{sql}: {err}");
+    }
+    assert_eq!(backend.count("cooper_ro", "t").unwrap(), 2);
+    drop(backend);
+
+    assert_eq!(setup.count("cooper_ro", "t").unwrap(), 2);
+    setup.conn.query_drop("DROP DATABASE cooper_ro").unwrap();
 }

@@ -459,6 +459,9 @@ fn note_press(b: &mut Browser, tx: &mut Tx) {
 }
 
 fn edit_value(b: &mut Browser, column: Option<usize>, fallback: bool, tx: &mut Tx) {
+    if b.connection.read_only {
+        return status(b, super::READ_ONLY_EDIT, false);
+    }
     let Some(grid) = &b.table.grid else {
         return;
     };
@@ -543,6 +546,10 @@ fn save_draft(s: &mut Workspace, tab: TabId) {
         draft.error = Some("Nothing changed".to_string());
         return;
     };
+    if b.connection.read_only {
+        draft.error = Some(format!("Not saved: {}", super::READ_ONLY_EDIT));
+        return;
+    }
     if b.connection.asks_to_confirm() {
         let statement = match guard::row_update(b.connection.kind, &update) {
             Ok(statement) => statement,
@@ -1067,7 +1074,9 @@ fn record_view(b: &Browser, grid: &Grid, page: &Page, t: &Theme) -> El {
             .and_then(|draft| draft.field(index));
         let kept = draft.and_then(|draft| draft.value(index));
         let changed = draft.is_some_and(|draft| draft.changed(index));
-        let editable = keyed && matches!(edit::exact(page, row_index, index), Exact::Value(_));
+        let editable = keyed
+            && !b.connection.read_only
+            && matches!(edit::exact(page, row_index, index), Exact::Value(_));
         let name_color = if changed { t.blue } else { t.foreground };
         let name = row()
             .gap(4.0)

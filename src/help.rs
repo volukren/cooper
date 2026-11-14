@@ -129,6 +129,11 @@ const SECTIONS: &[Section] = &[
                 "Tag the connection: Development, Testing, Staging or Production",
             ),
             b(
+                &[T("Read-only box")],
+                "Make the connection read-only: scripts that change data or schema are not \
+                 run, and rows can't be edited",
+            ),
+            b(
                 &[T("Store password")],
                 "Keep the password in the system keychain or in the config",
             ),
@@ -228,6 +233,10 @@ const SECTIONS: &[Section] = &[
                 &[T("Production")],
                 "Saving asks to confirm first on a connection tagged Production",
             ),
+            b(
+                &[T("Read-only")],
+                "Rows can't be edited on a read-only connection",
+            ),
         ],
     },
     Section {
@@ -241,6 +250,11 @@ const SECTIONS: &[Section] = &[
                 &[T("Production")],
                 "A script that changes data or schema asks to confirm first on a connection \
                  tagged Production (SELECT, SHOW, EXPLAIN… run directly)",
+            ),
+            b(
+                &[T("Read-only")],
+                "A script with a statement that is not a plain read is not run at all on a \
+                 read-only connection, and the database session itself refuses writes",
             ),
             b(&[c(CancelScript), K("escape")], "Cancel the running script"),
             b(

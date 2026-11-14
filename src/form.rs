@@ -5,8 +5,8 @@ use rune::{
     text,
 };
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Dialog as KitDialog, IconButton, IconButtonVariant,
-    Placement, RadioItem, Select, SelectAppearance, TextInput,
+    Button, ButtonVariant, Checkbox, ControlSize, Dialog as KitDialog, IconButton,
+    IconButtonVariant, Placement, RadioItem, Select, SelectAppearance, TextInput,
 };
 
 use crate::{
@@ -31,6 +31,9 @@ const TAGS: [Option<Tag>; 5] = [
 ];
 const PROD_HINT: &str =
     "Scripts that change data or schema, and row edits, will ask for confirmation.";
+const READ_ONLY_LABEL: &str = "Read-only";
+const READ_ONLY_HINT: &str =
+    "Scripts that change data or schema will not be run, and rows can't be edited.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormValues {
@@ -43,6 +46,7 @@ pub struct FormValues {
     pub storage: PasswordStorage,
     pub database: String,
     pub tag: Option<Tag>,
+    pub read_only: bool,
 }
 
 impl Default for FormValues {
@@ -58,6 +62,7 @@ impl Default for FormValues {
             storage: PasswordStorage::default(),
             database: String::new(),
             tag: None,
+            read_only: false,
         }
     }
 }
@@ -74,6 +79,7 @@ impl FormValues {
             storage: conn.password_storage,
             database: conn.database.clone(),
             tag: conn.tag,
+            read_only: conn.read_only,
         }
     }
 }
@@ -119,6 +125,7 @@ pub fn validate(
             name: name.into(),
             kind: values.kind,
             tag: values.tag,
+            read_only: values.read_only,
             host: String::new(),
             port: None,
             user: String::new(),
@@ -141,6 +148,7 @@ pub fn validate(
         name: name.into(),
         kind: values.kind,
         tag: values.tag,
+        read_only: values.read_only,
         host: host.into(),
         port,
         user: values.user.trim().into(),
@@ -194,7 +202,7 @@ const FORM_CHROME: f32 = 150.0;
 const MAX_LABEL_WIDTH: f32 = 168.0;
 const FIELD_GAP: f32 = 12.0;
 const ROW_WIDTH: f32 = 468.0;
-const LABELS: [&str; 11] = [
+const LABELS: [&str; 12] = [
     "URL",
     "Name",
     "Type",
@@ -206,6 +214,7 @@ const LABELS: [&str; 11] = [
     "Database",
     "File path",
     "Environment",
+    "Access",
 ];
 
 fn label_width(t: &Theme) -> f32 {
@@ -229,6 +238,7 @@ pub struct ConnectionForm {
     pub kind: DbKind,
     pub storage: PasswordStorage,
     pub tag: Option<Tag>,
+    pub read_only: bool,
     pub url: TextEdit,
     pub name: TextEdit,
     pub host: TextEdit,
@@ -271,6 +281,7 @@ impl ConnectionForm {
             kind: values.kind,
             storage: values.storage,
             tag: values.tag,
+            read_only: values.read_only,
             url: TextEdit::new(""),
             name,
             host: TextEdit::new(values.host.clone()),
@@ -298,6 +309,7 @@ impl ConnectionForm {
             storage: self.storage,
             database: self.database.text.clone(),
             tag: self.tag,
+            read_only: self.read_only,
         }
     }
 
@@ -359,6 +371,11 @@ impl ConnectionForm {
 
     pub fn set_tag(&mut self, tag: Option<Tag>) {
         self.tag = tag;
+        self.error = None;
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
         self.error = None;
     }
 
@@ -561,6 +578,21 @@ fn field_row(label: &str, control: El, t: &Theme) -> El {
                 .w(label_width(t)),
         )
         .child(col().grow(1.0).min_w(0.0).child(control))
+}
+
+fn hint_row(key: &'static str, hint: &'static str, t: &Theme) -> El {
+    row()
+        .w_full()
+        .child(col().w(label_width(t) + FIELD_GAP))
+        .child(
+            text(hint)
+                .key(key)
+                .font(t.text_xs)
+                .color(t.muted)
+                .wrap()
+                .grow(1.0)
+                .min_w(0.0),
+        )
 }
 
 fn select_row(key: &'static str, select: El) -> El {
@@ -800,21 +832,18 @@ pub fn dialog(
     body = body
         .child(field_row(database_label(form.kind), database, t))
         .child(field_row("Environment", tag, t));
-    if form.tag == Some(Tag::Prod) {
-        body = body.child(
-            row()
-                .w_full()
-                .child(col().w(label_width(t) + FIELD_GAP))
-                .child(
-                    text(PROD_HINT)
-                        .key("form-tag-hint")
-                        .font(t.text_xs)
-                        .color(t.muted)
-                        .wrap()
-                        .grow(1.0)
-                        .min_w(0.0),
-                ),
-        );
+    let read_only = form.read_only;
+    if form.tag == Some(Tag::Prod) && !read_only {
+        body = body.child(hint_row("form-tag-hint", PROD_HINT, t));
+    }
+    let access = Checkbox::new(read_only)
+        .label(READ_ONLY_LABEL)
+        .on_toggle(move |s: &mut Workspace| with_form(s, |f| f.set_read_only(!read_only)))
+        .build(&t.k)
+        .key("form-read-only");
+    body = body.child(field_row("Access", row().w_full().child(access), t));
+    if read_only {
+        body = body.child(hint_row("form-read-only-hint", READ_ONLY_HINT, t));
     }
 
     if let Some(error) = &form.error {
@@ -903,6 +932,7 @@ mod tests {
             name: name.into(),
             kind,
             tag: None,
+            read_only: false,
             host: if kind.is_file_based() {
                 String::new()
             } else {
@@ -995,6 +1025,7 @@ mod tests {
             storage: PasswordStorage::Plain,
             database: "  /data/app.db ".into(),
             tag: Some(Tag::Staging),
+            read_only: false,
         };
         let (conn, password) = validate(&v, None, &[]).unwrap();
         assert_eq!(conn.name, "local");
@@ -1026,6 +1057,40 @@ mod tests {
                 validate(&reopened, Some("shop"), std::slice::from_ref(&conn)).unwrap();
             assert_eq!(again.tag, Some(Tag::Prod), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn read_only_round_trips_through_validation_and_edit() {
+        for kind in [DbKind::Postgres, DbKind::MySql, DbKind::Sqlite] {
+            let v = FormValues {
+                kind,
+                name: "shop".into(),
+                database: "/tmp/shop.db".into(),
+                read_only: true,
+                ..FormValues::default()
+            };
+            let (conn, _) = validate(&v, None, &[]).unwrap();
+            assert!(conn.read_only, "{kind:?}");
+            assert!(!conn.asks_to_confirm(), "read-only is not a tag");
+
+            let reopened = FormValues::from_connection(&conn, "");
+            assert!(reopened.read_only);
+            let (again, _) =
+                validate(&reopened, Some("shop"), std::slice::from_ref(&conn)).unwrap();
+            assert!(again.read_only, "{kind:?}");
+
+            let cleared = FormValues {
+                read_only: false,
+                ..reopened
+            };
+            let (writable, _) =
+                validate(&cleared, Some("shop"), std::slice::from_ref(&conn)).unwrap();
+            assert!(!writable.read_only, "{kind:?}");
+        }
+        assert!(
+            !FormValues::default().read_only,
+            "new connections can write"
+        );
     }
 
     #[test]
