@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use color_eyre::{Result, eyre::WrapErr};
-use rune::{Chord, ChordKey, Cx, El, KeyEvent, Tx, col, row, text};
+use rune::{Chord, ChordKey, Cx, El, Icon, KeyEvent, Tx, col, row, text};
 use rune_kit::{
     Button, ButtonVariant, Combobox, ComboboxOption, ComboboxState, ControlSize, IconButton,
     IconButtonVariant, SegmentedControl,
@@ -336,24 +336,38 @@ struct Recording {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
-    General,
+    Appearance,
     Shortcuts,
 }
 
 impl Page {
-    const ALL: [Page; 2] = [Page::General, Page::Shortcuts];
+    const ALL: [Page; 2] = [Page::Appearance, Page::Shortcuts];
 
     fn id(self) -> &'static str {
         match self {
-            Page::General => "general",
+            Page::Appearance => "appearance",
             Page::Shortcuts => "shortcuts",
         }
     }
 
     fn title(self) -> &'static str {
         match self {
-            Page::General => "General",
+            Page::Appearance => "Appearance",
             Page::Shortcuts => "Keyboard shortcuts",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Page::Appearance => "Colors and fonts",
+            Page::Shortcuts => "Click a shortcut and press the new keys. Esc cancels.",
+        }
+    }
+
+    fn icon(self) -> &'static Icon {
+        match self {
+            Page::Appearance => &icons::PALETTE,
+            Page::Shortcuts => &icons::KEYBOARD,
         }
     }
 }
@@ -584,82 +598,84 @@ fn reset(s: &mut Workspace, cmd: Option<Command>, tx: &mut Tx) {
     s.keymap_changed(tx);
 }
 
-fn section_title(title: &str, extra: Option<El>, t: &Theme) -> El {
-    row()
+const FONT_NOTE: &str = "Type to search, or enter a list such as “Fira Code, Menlo”. A font that isn't installed falls back to a system font.";
+
+struct Section {
+    key: Option<&'static str>,
+    title: String,
+    extra: Option<El>,
+    rows: Vec<El>,
+    note: Option<&'static str>,
+    dense: bool,
+}
+
+fn section(section: Section, t: &Theme) -> El {
+    let Section {
+        key,
+        title,
+        extra,
+        rows,
+        note,
+        dense,
+    } = section;
+    let mut el = col()
         .w_full()
-        .min_h(24.0)
-        .pb(4.0)
-        .gap(8.0)
-        .center_y()
-        .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
         .child(
-            text(title.to_string())
-                .font(t.bold(t.text_sm))
-                .color(t.blue)
-                .grow(1.0),
+            row()
+                .w_full()
+                .min_h(22.0)
+                .pb(10.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(title)
+                        .font(t.semibold(t.text_sm))
+                        .color(t.foreground)
+                        .grow(1.0),
+                )
+                .children(extra),
         )
-        .children(extra)
-}
-
-fn appearance(s: &Workspace, t: &Theme) -> El {
-    let labels = ThemeMode::ALL.map(ThemeMode::label);
-    let selected = ThemeMode::ALL.iter().position(|&mode| mode == s.theme_mode);
-    let picker = SegmentedControl::new(&labels, selected)
-        .label("Theme")
-        .on_pick(|s: &mut Workspace, index: usize, tx: &mut Tx| {
-            if let Some(&mode) = ThemeMode::ALL.get(index) {
-                s.set_theme(mode, tx);
-            }
-        })
-        .build(&t.k)
-        .key("theme-mode");
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(section_title("Appearance", None, t))
-        .child(setting_row(
-            "Theme",
-            "System follows the appearance of the OS",
-            picker,
-            t,
-        ))
-}
-
-fn fonts(s: &Workspace, settings: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
-    let modified = s.fonts != Fonts::default();
-    let reset = modified.then(|| {
-        Button::new("Reset")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Mini)
-            .help("Back to the default fonts")
-            .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.set_fonts(Fonts::default(), tx))
-            .build(&t.k)
-            .key("reset-fonts")
-    });
-    col()
-        .key("settings-fonts")
-        .w_full()
-        .gap(8.0)
-        .child(section_title("Fonts", reset, t))
-        .child(setting_row(
-            "Interface",
-            "Menus, lists, forms and dialogs",
-            font_picker_el(s, settings, FontSlot::Interface, t, layer),
-            t,
-        ))
-        .child(setting_row(
-            "Code",
-            "The SQL editor, results and table data",
-            font_picker_el(s, settings, FontSlot::Code, t, layer),
-            t,
-        ))
         .child(
-            text("Type to search, or enter a list such as “Fira Code, Menlo”. A font that isn't installed falls back to a system font.")
+            col()
+                .w_full()
+                .gap(if dense { 4.0 } else { 14.0 })
+                .children(rows),
+        )
+        .children(note.map(|note| {
+            text(note)
                 .font(t.text_xs)
                 .color(t.muted)
                 .wrap()
-                .w_full(),
-        )
+                .w_full()
+                .pt(8.0)
+        }));
+    if let Some(key) = key {
+        el = el.key(key);
+    }
+    el
+}
+
+fn sections(sections: Vec<Section>, t: &Theme, gap: f32) -> El {
+    col()
+        .w_full()
+        .gap(gap)
+        .children(sections.into_iter().map(|item| section(item, t)))
+}
+
+fn mini_button(
+    label: &str,
+    help: &str,
+    key: impl Into<String>,
+    t: &Theme,
+    press: impl Fn(&mut Workspace, &mut Tx) + 'static,
+) -> El {
+    Button::new(label)
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Mini)
+        .help(help)
+        .on_press_tx(press)
+        .build(&t.k)
+        .key(key.into())
 }
 
 fn setting_row(title: &str, hint: &str, control: El, t: &Theme) -> El {
@@ -678,14 +694,82 @@ fn setting_row(title: &str, hint: &str, control: El, t: &Theme) -> El {
         .child(control)
 }
 
-fn chip(action: &'static Action, slot: usize, chord: Chord, recording: bool, t: &Theme) -> El {
+fn theme_picker(s: &Workspace, t: &Theme) -> El {
+    let labels = ThemeMode::ALL.map(ThemeMode::label);
+    let selected = ThemeMode::ALL.iter().position(|&mode| mode == s.theme_mode);
+    SegmentedControl::new(&labels, selected)
+        .label("Theme")
+        .on_pick(|s: &mut Workspace, index: usize, tx: &mut Tx| {
+            if let Some(&mode) = ThemeMode::ALL.get(index) {
+                s.set_theme(mode, tx);
+            }
+        })
+        .build(&t.k)
+        .key("theme-mode")
+}
+
+fn appearance_sections(
+    s: &Workspace,
+    settings: &Settings,
+    t: &Theme,
+    layer: &mut Vec<El>,
+) -> Vec<Section> {
+    let reset_fonts = (s.fonts != Fonts::default()).then(|| {
+        mini_button(
+            "Reset",
+            "Back to the default fonts",
+            "reset-fonts",
+            t,
+            |s, tx| s.set_fonts(Fonts::default(), tx),
+        )
+    });
+    vec![
+        Section {
+            key: None,
+            title: "Theme".into(),
+            extra: None,
+            rows: vec![setting_row(
+                "Color scheme",
+                "System follows the appearance of the OS",
+                theme_picker(s, t),
+                t,
+            )],
+            note: None,
+            dense: false,
+        },
+        Section {
+            key: Some("settings-fonts"),
+            title: "Fonts".into(),
+            extra: reset_fonts,
+            rows: vec![
+                setting_row(
+                    "Interface",
+                    "Menus, lists, forms and dialogs",
+                    font_picker_el(s, settings, FontSlot::Interface, t, layer),
+                    t,
+                ),
+                setting_row(
+                    "Code",
+                    "The SQL editor, results and table data",
+                    font_picker_el(s, settings, FontSlot::Code, t, layer),
+                    t,
+                ),
+            ],
+            note: Some(FONT_NOTE),
+            dense: false,
+        },
+    ]
+}
+
+fn keycap(action: &'static Action, slot: usize, chord: Chord, recording: bool, t: &Theme) -> El {
     let label = chord.label();
-    let (content, color, border) = if recording {
-        ("Press keys…".to_string(), t.muted, t.ring)
+    let c = &t.k.c;
+    let (content, border, fill) = if recording {
+        ("Press keys…".to_string(), t.ring, t.k.alpha(t.ring, 0.14))
     } else {
-        (label.clone(), t.foreground, t.border)
+        (label.clone(), c.border_base, c.layer_02)
     };
-    row()
+    let mut cap = row()
         .key(chip_key(action, slot))
         .role("button")
         .label(format!("{}: {label}", action.title))
@@ -693,15 +777,19 @@ fn chip(action: &'static Action, slot: usize, chord: Chord, recording: bool, t: 
         .focusable(true)
         .focus_ring(2.0, 1.0, t.ring)
         .h(22.0)
-        .min_w(28.0)
-        .px(6.0)
+        .min_w(26.0)
+        .px(7.0)
         .center()
-        .radius(4.0)
+        .radius(5.0)
+        .fill(fill)
         .border(1.0, border)
-        .hover(t.list_hover)
-        .child(text(content).font(t.medium(t.text_xs)).color(color))
+        .child(text(content).font(t.medium(t.text_xs)).color(t.foreground))
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| begin_recording(s, action, slot, tx))
-        .on_key(record_key)
+        .on_key(record_key);
+    if !recording {
+        cap = cap.shadow(1.0, 0.0, c.border_base).hover(c.layer_03);
+    }
+    cap
 }
 
 fn shortcut_row(action: &'static Action, settings: &Settings, t: &Theme) -> El {
@@ -722,29 +810,28 @@ fn shortcut_row(action: &'static Action, settings: &Settings, t: &Theme) -> El {
             notes.push((message, t.warning));
         }
     }
-    let chips = chords.iter().enumerate().map(|(slot, &chord)| {
+    let caps = chords.iter().enumerate().map(|(slot, &chord)| {
         let active = recording.is_some_and(|recording| recording.slot == slot);
-        chip(action, slot, chord, active, t)
+        keycap(action, slot, chord, active, t)
     });
     let undo = modified.then(|| {
-        Button::new("Reset")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Mini)
-            .help("Back to the default shortcut")
-            .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| reset(s, Some(cmd), tx))
-            .build(&t.k)
-            .key(format!("reset-{}", action.id))
+        mini_button(
+            "Reset",
+            "Back to the default shortcut",
+            format!("reset-{}", action.id),
+            t,
+            move |s, tx| reset(s, Some(cmd), tx),
+        )
     });
     col()
         .key(format!("shortcut-row-{}", action.id))
         .w_full()
-        .py(3.0)
-        .gap(2.0)
+        .gap(3.0)
         .child(
             row()
                 .w_full()
-                .min_h(22.0)
-                .gap(8.0)
+                .min_h(24.0)
+                .gap(6.0)
                 .center_y()
                 .child(
                     text(action.title)
@@ -755,7 +842,7 @@ fn shortcut_row(action: &'static Action, settings: &Settings, t: &Theme) -> El {
                         .min_w(0.0),
                 )
                 .children(undo)
-                .children(chips),
+                .children(caps),
         )
         .children(
             notes
@@ -764,7 +851,7 @@ fn shortcut_row(action: &'static Action, settings: &Settings, t: &Theme) -> El {
         )
 }
 
-fn shortcuts(settings: &Settings, t: &Theme) -> El {
+fn shortcut_sections(settings: &Settings, t: &Theme) -> Vec<Section> {
     let mut groups: Vec<(&str, Vec<&'static Action>)> = Vec::new();
     for action in ACTIONS {
         match groups.last_mut() {
@@ -772,34 +859,24 @@ fn shortcuts(settings: &Settings, t: &Theme) -> El {
             _ => groups.push((action.group, vec![action])),
         }
     }
-    col()
-        .key("settings-shortcuts")
-        .w_full()
-        .pr(12.0)
-        .children(
-            groups
+    groups
+        .into_iter()
+        .map(|(group, actions)| Section {
+            key: None,
+            title: group.to_string(),
+            extra: None,
+            rows: actions
                 .into_iter()
-                .enumerate()
-                .map(|(index, (group, actions))| {
-                    col()
-                        .w_full()
-                        .mt(if index > 0 { 12.0 } else { 0.0 })
-                        .child(
-                            text(group.to_uppercase())
-                                .font(t.semibold(t.text_xs))
-                                .color(t.muted)
-                                .pb(2.0),
-                        )
-                        .children(
-                            actions
-                                .into_iter()
-                                .map(|action| shortcut_row(action, settings, t)),
-                        )
-                }),
-        )
+                .map(|action| shortcut_row(action, settings, t))
+                .collect(),
+            note: None,
+            dense: true,
+        })
+        .collect()
 }
 
-const NAV_WIDTH: f32 = 168.0;
+const NAV_WIDTH: f32 = 176.0;
+const PAGE_PX: f32 = 20.0;
 
 fn nav(settings: &Settings, t: &Theme) -> El {
     let clear = t.background.alpha(0.0);
@@ -809,11 +886,12 @@ fn nav(settings: &Settings, t: &Theme) -> El {
         .label("Settings pages")
         .w(NAV_WIDTH)
         .h_full()
-        .pr(8.0)
-        .gap(1.0)
+        .padding(8.0)
+        .gap(2.0)
         .border_sides([0.0, 1.0, 0.0, 0.0], t.border)
         .children(Page::ALL.into_iter().map(|page| {
             let active = settings.page == page;
+            let color = if active { t.foreground } else { t.muted };
             let mut item = row()
                 .key(format!("settings-nav-{}", page.id()))
                 .role("tab")
@@ -822,11 +900,13 @@ fn nav(settings: &Settings, t: &Theme) -> El {
                 .focus_selected(active)
                 .focus_ring(2.0, -1.0, t.ring)
                 .w_full()
-                .h(28.0)
+                .h(30.0)
                 .px(8.0)
+                .gap(8.0)
                 .center_y()
                 .radius(RADIUS)
                 .fill(if active { t.list_active } else { clear })
+                .child(ui::icon_el(page.icon(), 15.0, color))
                 .child(
                     text(page.title())
                         .font(if active {
@@ -834,7 +914,7 @@ fn nav(settings: &Settings, t: &Theme) -> El {
                         } else {
                             t.text_sm
                         })
-                        .color(if active { t.foreground } else { t.muted })
+                        .color(color)
                         .truncate()
                         .min_w(0.0),
                 )
@@ -846,50 +926,74 @@ fn nav(settings: &Settings, t: &Theme) -> El {
         }))
 }
 
-fn general_page(s: &Workspace, settings: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
+fn page_header(settings: &Settings, t: &Theme) -> El {
+    let extra = match settings.page {
+        Page::Appearance => None,
+        Page::Shortcuts => keys::with(Keymap::any_modified).then(|| {
+            mini_button(
+                "Reset all",
+                "Back to the default shortcuts",
+                "reset-all-shortcuts",
+                t,
+                |s, tx| reset(s, None, tx),
+            )
+        }),
+    };
+    row()
+        .w_full()
+        .px(PAGE_PX)
+        .py(16.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text(settings.page.title())
+                        .font(t.semibold(t.text))
+                        .color(t.foreground),
+                )
+                .child(ui::label(settings.page.subtitle(), t.text_xs, t.muted)),
+        )
+        .children(extra)
+}
+
+fn appearance_page(s: &Workspace, settings: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
     col()
-        .key("settings-general")
+        .key("settings-appearance")
         .w_full()
         .h_full()
-        .gap(20.0)
-        .child(appearance(s, t))
-        .child(fonts(s, settings, t, layer))
+        .px(PAGE_PX)
+        .pt(4.0)
+        .child(sections(
+            appearance_sections(s, settings, t, layer),
+            t,
+            24.0,
+        ))
 }
 
 fn shortcuts_page(settings: &Settings, t: &Theme) -> El {
-    let reset_all = keys::with(Keymap::any_modified).then(|| {
-        Button::new("Reset all")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Mini)
-            .help("Back to the default shortcuts")
-            .on_press_tx(|s: &mut Workspace, tx: &mut Tx| reset(s, None, tx))
-            .build(&t.k)
-            .key("reset-all-shortcuts")
-    });
     let list = t.k.scroll_bar(ui::scroll_view(
         "settings-list",
         &settings.scroll,
-        shortcuts(settings, t),
+        col()
+            .key("settings-shortcuts")
+            .w_full()
+            .px(PAGE_PX)
+            .pt(4.0)
+            .pb(16.0)
+            .child(sections(shortcut_sections(settings, t), t, 20.0)),
     ));
-    col()
-        .key("settings-keys")
-        .w_full()
-        .h_full()
-        .gap(8.0)
-        .child(section_title("Keyboard shortcuts", reset_all, t))
-        .child(ui::label(
-            "Click a shortcut and press the new keys. Esc cancels.",
-            t.text_xs,
-            t.muted,
-        ))
-        .child(
-            col()
-                .key("settings-box")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .child(list),
-        )
+    col().key("settings-keys").w_full().h_full().child(
+        col()
+            .key("settings-box")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(list),
+    )
 }
 
 pub fn dialog(
@@ -901,10 +1005,10 @@ pub fn dialog(
 ) {
     let height = cx
         .layout_size("workspace")
-        .map_or(480.0, |size| (size[1] - 240.0).clamp(200.0, 480.0));
+        .map_or(496.0, |size| (size[1] - 224.0).clamp(216.0, 496.0));
     let mut popups = Vec::new();
     let page = match settings.page {
-        Page::General => general_page(s, settings, t, &mut popups),
+        Page::Appearance => appearance_page(s, settings, t, &mut popups),
         Page::Shortcuts => shortcuts_page(settings, t),
     };
     let close = IconButton::new(&icons::CLOSE)
@@ -914,9 +1018,14 @@ pub fn dialog(
         .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.close_dialog(tx))
         .build(&t.k)
         .key("close");
-    let title = row()
+    let header = row()
         .w_full()
+        .px(16.0)
+        .py(10.0)
+        .gap(8.0)
         .center_y()
+        .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
+        .child(ui::icon_el(&icons::SETTINGS, 15.0, t.muted))
         .child(
             text("Settings")
                 .font(t.semibold(t.text))
@@ -925,16 +1034,11 @@ pub fn dialog(
         )
         .child(close);
     Modal::new("settings", "Settings")
-        .title(title)
         .width(760.0)
+        .flush()
         .child(
-            row()
-                .key("settings")
-                .w_full()
-                .h(height)
-                .gap(16.0)
-                .child(nav(settings, t))
-                .child(
+            col().key("settings").w_full().child(header).child(
+                row().w_full().h(height).child(nav(settings, t)).child(
                     col()
                         .key("settings-page")
                         .role("tabpanel")
@@ -942,8 +1046,10 @@ pub fn dialog(
                         .grow(1.0)
                         .min_w(0.0)
                         .h_full()
-                        .child(page),
+                        .child(page_header(settings, t))
+                        .child(col().w_full().grow(1.0).min_h(0.0).pb(12.0).child(page)),
                 ),
+            ),
         )
         .build(t, layer, |s: &mut Workspace, tx: &mut Tx| {
             s.close_dialog(tx)

@@ -317,6 +317,7 @@ pub struct Modal {
     label: String,
     title: Option<El>,
     width: f32,
+    flush: bool,
     body: Vec<El>,
 }
 
@@ -327,6 +328,7 @@ impl Modal {
             label: label.into(),
             title: None,
             width: 480.0,
+            flush: false,
             body: Vec::new(),
         }
     }
@@ -341,6 +343,11 @@ impl Modal {
         self
     }
 
+    pub fn flush(mut self) -> Self {
+        self.flush = true;
+        self
+    }
+
     pub fn child(mut self, body: El) -> Self {
         self.body.push(body);
         self
@@ -352,29 +359,34 @@ impl Modal {
         layer: &mut Vec<El>,
         dismiss: impl Fn(&mut S, &mut Tx) + 'static,
     ) {
-        let title = self.title.unwrap_or_else(|| {
-            text(self.label.clone())
-                .font(t.semibold(t.text))
-                .color(t.foreground)
-        });
-        let header = row()
-            .key("modal-header")
-            .w_full()
-            .px(16.0)
-            .pt(16.0)
-            .pb(8.0)
-            .gap(8.0)
-            .center_y()
-            .child(title);
-        let body = col()
-            .key("modal-body")
-            .w_full()
-            .px(16.0)
-            .pb(16.0)
-            .gap(12.0)
-            .min_h(0.0)
-            .children(self.body);
-        let panel = col()
+        let content = if self.flush {
+            self.body
+        } else {
+            let title = self.title.unwrap_or_else(|| {
+                text(self.label.clone())
+                    .font(t.semibold(t.text))
+                    .color(t.foreground)
+            });
+            let header = row()
+                .key("modal-header")
+                .w_full()
+                .px(16.0)
+                .pt(16.0)
+                .pb(8.0)
+                .gap(8.0)
+                .center_y()
+                .child(title);
+            let body = col()
+                .key("modal-body")
+                .w_full()
+                .px(16.0)
+                .pb(16.0)
+                .gap(12.0)
+                .min_h(0.0)
+                .children(self.body);
+            vec![header, body]
+        };
+        let mut panel = col()
             .key(format!("{}-dialog", self.key))
             .role("dialog")
             .label(self.label)
@@ -383,9 +395,11 @@ impl Modal {
             .radius(RADIUS)
             .fill(t.background)
             .border(1.0, t.modal_border)
-            .child(header)
-            .child(body)
-            .modal_tx(true, dismiss);
+            .children(content);
+        if self.flush {
+            panel = panel.padding(1.0).clip_rounded(RADIUS);
+        }
+        let panel = panel.modal_tx(true, dismiss);
         let panel = t.k.elevate(panel, &t.k.elevation.overlay);
         layer.push(
             el().key(format!("{}-scrim", self.key))

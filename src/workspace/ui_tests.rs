@@ -1756,7 +1756,7 @@ fn the_settings_pages_switch_from_the_sidebar() {
     let config = TestConfig::with_sample_dbs(&["shop"]);
     let mut ws = TestWorkspace::open(&config);
     ws.press("cmd-,");
-    assert_eq!(settings_page(&ws), Some(Page::General));
+    assert_eq!(settings_page(&ws), Some(Page::Appearance));
     assert!(ws.exists("theme-mode"));
     assert!(!ws.exists("settings-list"));
 
@@ -1766,7 +1766,7 @@ fn the_settings_pages_switch_from_the_sidebar() {
     assert!(!ws.exists("theme-mode"));
 
     ws.click("shortcut-show-help-0");
-    ws.click("settings-nav-general");
+    ws.click("settings-nav-appearance");
     assert!(ws.exists("theme-mode"));
     ws.click("settings-nav-shortcuts");
     assert!(
@@ -1775,7 +1775,7 @@ fn the_settings_pages_switch_from_the_sidebar() {
     );
 
     ws.press("escape cmd-,");
-    assert_eq!(settings_page(&ws), Some(Page::General));
+    assert_eq!(settings_page(&ws), Some(Page::Appearance));
 }
 
 fn help_open(ws: &TestWorkspace) -> bool {
@@ -1868,7 +1868,7 @@ fn snapshots_of_the_settings() {
         let config = TestConfig::with_sample_dbs(&["shop"]);
         let mut ws = TestWorkspace::open_with(config.store(), dark);
         ws.press("cmd-,");
-        shot(&mut ws, "01-general");
+        shot(&mut ws, "01-appearance");
         ws.click("settings-nav-shortcuts");
         shot(&mut ws, "02-shortcuts");
         ws.click("shortcut-show-help-0");
@@ -1876,7 +1876,7 @@ fn snapshots_of_the_settings() {
         shot(&mut ws, "03-recording");
         ws.press("cmd-w");
         shot(&mut ws, "04-conflict");
-        ws.click("settings-nav-general");
+        ws.click("settings-nav-appearance");
         ws.click("font-code-value-trigger");
         ws.type_text("Mon");
         shot(&mut ws, "05-font-picker");
