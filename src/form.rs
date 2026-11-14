@@ -10,7 +10,7 @@ use rune_kit::{
 };
 
 use crate::{
-    connection::{self, Connection, DbKind, PasswordStorage, Tag},
+    connection::{self, Connection, DbKind, PasswordStorage, SslMode, Tag, expand_home},
     dialog::Dialog,
     icons, keys,
     theme::Theme,
@@ -47,6 +47,10 @@ pub struct FormValues {
     pub database: String,
     pub tag: Option<Tag>,
     pub read_only: bool,
+    pub ssl_mode: SslMode,
+    pub ssl_key: String,
+    pub ssl_cert: String,
+    pub ssl_ca: String,
 }
 
 impl Default for FormValues {
@@ -63,6 +67,10 @@ impl Default for FormValues {
             database: String::new(),
             tag: None,
             read_only: false,
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         }
     }
 }
@@ -80,6 +88,10 @@ impl FormValues {
             database: conn.database.clone(),
             tag: conn.tag,
             read_only: conn.read_only,
+            ssl_mode: conn.ssl_mode,
+            ssl_key: conn.ssl_key.clone(),
+            ssl_cert: conn.ssl_cert.clone(),
+            ssl_ca: conn.ssl_ca.clone(),
         }
     }
 }
@@ -132,6 +144,10 @@ pub fn validate(
             database,
             password_storage: PasswordStorage::default(),
             password: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         };
         return Ok((conn, String::new()));
     }
@@ -144,6 +160,32 @@ pub fn validate(
         "" => None,
         p => Some(p.parse::<u16>().map_err(|_| format!("Invalid port: {p}"))?),
     };
+    let ssl_path = |path: &str| {
+        if values.ssl_mode.uses_tls() {
+            path.trim().to_string()
+        } else {
+            String::new()
+        }
+    };
+    let (ssl_key, ssl_cert, ssl_ca) = (
+        ssl_path(&values.ssl_key),
+        ssl_path(&values.ssl_cert),
+        ssl_path(&values.ssl_ca),
+    );
+    match (ssl_key.is_empty(), ssl_cert.is_empty()) {
+        (false, true) => return Err("SSL cert is required with an SSL key".into()),
+        (true, false) => return Err("SSL key is required with an SSL cert".into()),
+        _ => {}
+    }
+    for (label, path) in [
+        ("SSL key", &ssl_key),
+        ("SSL cert", &ssl_cert),
+        ("CA cert", &ssl_ca),
+    ] {
+        if !path.is_empty() && !expand_home(path).is_file() {
+            return Err(format!("{label} file not found: {path}"));
+        }
+    }
     let conn = Connection {
         name: name.into(),
         kind: values.kind,
@@ -158,6 +200,10 @@ pub fn validate(
             PasswordStorage::Plain => values.password.clone(),
             PasswordStorage::Keychain => String::new(),
         },
+        ssl_mode: values.ssl_mode,
+        ssl_key,
+        ssl_cert,
+        ssl_ca,
     };
     Ok((conn, values.password.clone()))
 }
@@ -202,7 +248,7 @@ const FORM_CHROME: f32 = 150.0;
 const MAX_LABEL_WIDTH: f32 = 168.0;
 const FIELD_GAP: f32 = 12.0;
 const ROW_WIDTH: f32 = 468.0;
-const LABELS: [&str; 12] = [
+const LABELS: [&str; 16] = [
     "URL",
     "Name",
     "Type",
@@ -215,6 +261,10 @@ const LABELS: [&str; 12] = [
     "File path",
     "Environment",
     "Access",
+    "SSL mode",
+    "SSL key",
+    "SSL cert",
+    "CA cert",
 ];
 
 fn label_width(t: &Theme) -> f32 {
@@ -224,8 +274,8 @@ fn label_width(t: &Theme) -> f32 {
         .fold(LABEL_WIDTH, f32::max)
         .min(MAX_LABEL_WIDTH)
 }
-const FIELDS: [&str; 7] = [
-    "url", "name", "host", "port", "user", "password", "database",
+const FIELDS: [&str; 10] = [
+    "url", "name", "host", "port", "user", "password", "database", "ssl_key", "ssl_cert", "ssl_ca",
 ];
 
 pub struct FormDialog {
@@ -239,6 +289,7 @@ pub struct ConnectionForm {
     pub storage: PasswordStorage,
     pub tag: Option<Tag>,
     pub read_only: bool,
+    pub ssl_mode: SslMode,
     pub url: TextEdit,
     pub name: TextEdit,
     pub host: TextEdit,
@@ -246,8 +297,12 @@ pub struct ConnectionForm {
     pub user: TextEdit,
     pub password: TextEdit,
     pub database: TextEdit,
+    pub ssl_key: TextEdit,
+    pub ssl_cert: TextEdit,
+    pub ssl_ca: TextEdit,
     pub show_password: bool,
     pub tag_open: bool,
+    pub ssl_open: bool,
     pub error: Option<String>,
     pub last_field: Cell<Option<&'static str>>,
     pub scroll: ui::ScrollY,
@@ -281,6 +336,7 @@ impl ConnectionForm {
             storage: values.storage,
             tag: values.tag,
             read_only: values.read_only,
+            ssl_mode: values.ssl_mode,
             url: TextEdit::new(""),
             name,
             host: TextEdit::new(values.host.clone()),
@@ -288,8 +344,12 @@ impl ConnectionForm {
             user: TextEdit::new(values.user.clone()),
             password,
             database: TextEdit::new(values.database.clone()),
+            ssl_key: TextEdit::new(values.ssl_key.clone()),
+            ssl_cert: TextEdit::new(values.ssl_cert.clone()),
+            ssl_ca: TextEdit::new(values.ssl_ca.clone()),
             show_password: false,
             tag_open: false,
+            ssl_open: false,
             error,
             last_field: Cell::new(Some("name")),
             scroll: ui::ScrollY::default(),
@@ -308,6 +368,10 @@ impl ConnectionForm {
             database: self.database.text.clone(),
             tag: self.tag,
             read_only: self.read_only,
+            ssl_mode: self.ssl_mode,
+            ssl_key: self.ssl_key.text.clone(),
+            ssl_cert: self.ssl_cert.text.clone(),
+            ssl_ca: self.ssl_ca.text.clone(),
         }
     }
 
@@ -339,6 +403,10 @@ impl ConnectionForm {
             replace_keeping_focus(&mut self.port, port);
             replace_keeping_focus(&mut self.user, parsed.user);
             replace_keeping_focus(&mut self.password, parsed.password);
+            self.ssl_mode = parsed.ssl_mode;
+            replace_keeping_focus(&mut self.ssl_key, parsed.ssl_key);
+            replace_keeping_focus(&mut self.ssl_cert, parsed.ssl_cert);
+            replace_keeping_focus(&mut self.ssl_ca, parsed.ssl_ca);
         }
         replace_keeping_focus(&mut self.database, parsed.database);
         self.error = None;
@@ -377,6 +445,15 @@ impl ConnectionForm {
         self.error = None;
     }
 
+    pub fn set_ssl_mode(&mut self, mode: SslMode) {
+        self.ssl_mode = mode;
+        self.error = None;
+    }
+
+    pub fn shows_ssl_files(&self) -> bool {
+        !self.kind.is_file_based() && self.ssl_mode.uses_tls()
+    }
+
     pub fn title(&self) -> &'static str {
         if self.original.is_some() {
             "Edit connection"
@@ -394,6 +471,9 @@ impl ConnectionForm {
             "user" => &self.user,
             "password" => &self.password,
             "database" => &self.database,
+            "ssl_key" => &self.ssl_key,
+            "ssl_cert" => &self.ssl_cert,
+            "ssl_ca" => &self.ssl_ca,
             other => panic!("no text field {other:?}"),
         }
     }
@@ -407,6 +487,9 @@ impl ConnectionForm {
             "user" => &mut self.user,
             "password" => &mut self.password,
             "database" => &mut self.database,
+            "ssl_key" => &mut self.ssl_key,
+            "ssl_cert" => &mut self.ssl_cert,
+            "ssl_ca" => &mut self.ssl_ca,
             other => panic!("no text field {other:?}"),
         }
     }
@@ -448,6 +531,14 @@ pub fn tag_labels() -> [&'static str; 5] {
 
 fn tag_of(label: &str) -> Option<Option<Tag>> {
     TAGS.into_iter().find(|&tag| tag_label(tag) == label)
+}
+
+pub fn ssl_mode_labels() -> [&'static str; 5] {
+    SslMode::ALL.map(SslMode::label)
+}
+
+fn ssl_mode_of(label: &str) -> Option<SslMode> {
+    SslMode::ALL.into_iter().find(|mode| mode.label() == label)
 }
 
 fn with_form(s: &mut Workspace, f: impl FnOnce(&mut ConnectionForm)) {
@@ -602,7 +693,7 @@ fn select_row(key: &'static str, select: El) -> El {
         .child(select)
 }
 
-fn browse(s: &mut Workspace, tx: &mut Tx) {
+fn browse(s: &mut Workspace, tx: &mut Tx, pick: Pick) {
     refocus(s);
     let options = FileDialogOptions {
         title: "Choose".into(),
@@ -610,19 +701,33 @@ fn browse(s: &mut Workspace, tx: &mut Tx) {
     };
     tx.open_file(
         options,
-        |s: &mut Workspace, result: FileDialogResult, _tx: &mut Tx| {
+        move |s: &mut Workspace, result: FileDialogResult, _tx: &mut Tx| {
             if let Ok(Some(path)) = result {
                 let path = path.to_string_lossy().into_owned();
                 with_form(s, |f| {
-                    let focused = f.database.focused;
-                    f.database.replace_text(path);
-                    f.database.set_caret(f.database.text.len());
-                    f.database.focused = focused;
+                    replace_keeping_focus(pick(f), path);
                     f.error = None;
                 });
             }
         },
     );
+}
+
+fn with_browse(input: El, key: &'static str, help: &str, pick: Pick, t: &Theme) -> El {
+    row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(col().grow(1.0).min_w(0.0).child(input))
+        .child(
+            Button::new("Browse…")
+                .icon(&icons::FOLDER_OPEN)
+                .variant(ButtonVariant::Outline)
+                .help(help)
+                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| browse(s, tx, pick))
+                .build(&t.k)
+                .key(key),
+        )
 }
 
 pub fn dialog(
@@ -661,6 +766,7 @@ pub fn dialog(
                 .on_toggle(move |s: &mut Workspace| {
                     with_form(s, |f| {
                         f.tag_open = false;
+                        f.ssl_open = false;
                         f.set_kind(kind);
                     })
                 })
@@ -676,7 +782,12 @@ pub fn dialog(
         .current(Some(tag_label(form.tag)))
         .open(form.tag_open)
         .placement(Placement::BottomStart)
-        .on_toggle(|s: &mut Workspace| with_form(s, |f| f.tag_open = !f.tag_open))
+        .on_toggle(|s: &mut Workspace| {
+            with_form(s, |f| {
+                f.tag_open = !f.tag_open;
+                f.ssl_open = false;
+            })
+        })
         .on_close(|s: &mut Workspace| with_form(s, |f| f.tag_open = false))
         .on_choose(|s: &mut Workspace, label: &str, _tx: &mut Tx| {
             let tag = tag_of(label);
@@ -795,20 +906,13 @@ pub fn dialog(
     let database = if server {
         database
     } else {
-        row()
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .child(col().grow(1.0).min_w(0.0).child(database))
-            .child(
-                Button::new("Browse…")
-                    .icon(&icons::FOLDER_OPEN)
-                    .variant(ButtonVariant::Outline)
-                    .help("Choose the SQLite database file")
-                    .on_press_tx(browse)
-                    .build(&t.k)
-                    .key("browse"),
-            )
+        with_browse(
+            database,
+            "browse",
+            "Choose the SQLite database file",
+            |f| &mut f.database,
+            t,
+        )
     };
     body = body
         .child(field_row(database_label(form.kind), database, t))
@@ -825,6 +929,72 @@ pub fn dialog(
     body = body.child(field_row("Access", row().w_full().child(access), t));
     if read_only {
         body = body.child(hint_row("form-read-only-hint", READ_ONLY_HINT, t));
+    }
+    if server {
+        let ssl_mode = Select::new("form-ssl", &ssl_mode_labels())
+            .appearance(SelectAppearance::Field)
+            .width(ROW_WIDTH - FIELD_GAP - label_width(t))
+            .label("SSL mode")
+            .current(Some(form.ssl_mode.label()))
+            .open(form.ssl_open)
+            .placement(Placement::BottomStart)
+            .on_toggle(|s: &mut Workspace| {
+                with_form(s, |f| {
+                    f.ssl_open = !f.ssl_open;
+                    f.tag_open = false;
+                })
+            })
+            .on_close(|s: &mut Workspace| with_form(s, |f| f.ssl_open = false))
+            .on_choose(|s: &mut Workspace, label: &str, _tx: &mut Tx| {
+                let mode = ssl_mode_of(label);
+                with_form(s, |f| {
+                    f.ssl_open = false;
+                    if let Some(mode) = mode {
+                        f.set_ssl_mode(mode);
+                    }
+                });
+            })
+            .build(&t.k, &mut popups);
+        body = body.child(field_row("SSL mode", select_row("form-ssl", ssl_mode), t));
+    }
+    if form.shows_ssl_files() {
+        let files: [(&str, &'static str, &'static str, &str, Pick, &TextEdit); 3] = [
+            (
+                "SSL key",
+                "form-ssl-key",
+                "browse-ssl-key",
+                "Choose the client key file (PEM)",
+                |f| &mut f.ssl_key,
+                &form.ssl_key,
+            ),
+            (
+                "SSL cert",
+                "form-ssl-cert",
+                "browse-ssl-cert",
+                "Choose the client certificate file (PEM)",
+                |f| &mut f.ssl_cert,
+                &form.ssl_cert,
+            ),
+            (
+                "CA cert",
+                "form-ssl-ca",
+                "browse-ssl-ca",
+                "Choose the CA certificate file that signed the server certificate",
+                |f| &mut f.ssl_ca,
+                &form.ssl_ca,
+            ),
+        ];
+        for (label, key, browse_key, help, pick, edit) in files {
+            let path = input(edit, key, "optional", label, pick)
+                .on_key(field_key)
+                .build(&t.k)
+                .key(key);
+            body = body.child(field_row(
+                label,
+                with_browse(path, browse_key, help, pick, t),
+                t,
+            ));
+        }
     }
 
     if let Some(error) = &form.error {
@@ -903,10 +1073,10 @@ pub fn dialog(
 #[cfg(test)]
 mod tests {
     use super::{
-        FormValues, TAGS, is_port_text, port_after_kind_change, sanitize_paste, tag_label,
-        tag_labels, tag_of, validate,
+        FormValues, TAGS, is_port_text, port_after_kind_change, sanitize_paste, ssl_mode_labels,
+        ssl_mode_of, tag_label, tag_labels, tag_of, validate,
     };
-    use crate::connection::{Connection, DbKind, PasswordStorage, Tag};
+    use crate::connection::{Connection, DbKind, PasswordStorage, SslMode, Tag};
 
     fn conn(name: &str, kind: DbKind) -> Connection {
         Connection {
@@ -928,6 +1098,10 @@ mod tests {
             },
             password_storage: PasswordStorage::default(),
             password: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         }
     }
 
@@ -1007,6 +1181,10 @@ mod tests {
             database: "  /data/app.db ".into(),
             tag: Some(Tag::Staging),
             read_only: false,
+            ssl_mode: SslMode::VerifyFull,
+            ssl_key: "/missing/client.key".into(),
+            ssl_cert: "/missing/client.pem".into(),
+            ssl_ca: "/missing/ca.pem".into(),
         };
         let (conn, password) = validate(&v, None, &[]).unwrap();
         assert_eq!(conn.name, "local");
@@ -1015,6 +1193,8 @@ mod tests {
         assert_eq!(conn.port, None);
         assert_eq!(conn.password_storage, PasswordStorage::Keychain);
         assert_eq!(conn.tag, Some(Tag::Staging));
+        assert_eq!(conn.ssl_mode, SslMode::Prefer);
+        assert!(conn.ssl_key.is_empty() && conn.ssl_cert.is_empty() && conn.ssl_ca.is_empty());
         assert_eq!(password, "");
     }
 
@@ -1170,5 +1350,102 @@ mod tests {
         assert_eq!(sanitize_paste("\n", false), "");
         assert!(is_port_text("") && is_port_text("5432"));
         assert!(!is_port_text("54x") && !is_port_text("-1"));
+    }
+
+    fn fixture(name: &str) -> String {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/db/fixtures")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn ssl_settings_round_trip_through_validation_and_edit() {
+        let v = FormValues {
+            ssl_mode: SslMode::VerifyFull,
+            ssl_key: format!(" {} ", fixture("client.key")),
+            ssl_cert: fixture("client.pem"),
+            ssl_ca: fixture("ca.pem"),
+            ..values("secure")
+        };
+        let (conn, _) = validate(&v, None, &[]).unwrap();
+        assert_eq!(conn.ssl_mode, SslMode::VerifyFull);
+        assert_eq!(conn.ssl_key, fixture("client.key"), "paths are trimmed");
+        assert_eq!(conn.ssl_cert, fixture("client.pem"));
+        assert_eq!(conn.ssl_ca, fixture("ca.pem"));
+
+        let reopened = FormValues::from_connection(&conn, "");
+        assert_eq!(reopened.ssl_mode, SslMode::VerifyFull);
+        assert_eq!(reopened.ssl_ca, fixture("ca.pem"));
+        let (again, _) = validate(&reopened, Some("secure"), std::slice::from_ref(&conn)).unwrap();
+        assert_eq!(
+            (again.ssl_mode, again.ssl_key, again.ssl_cert, again.ssl_ca),
+            (conn.ssl_mode, conn.ssl_key, conn.ssl_cert, conn.ssl_ca)
+        );
+    }
+
+    #[test]
+    fn ssl_files_are_checked_and_cert_and_key_go_together() {
+        let only_key = FormValues {
+            ssl_key: fixture("client.key"),
+            ..values("secure")
+        };
+        assert_eq!(
+            validate(&only_key, None, &[]).unwrap_err(),
+            "SSL cert is required with an SSL key"
+        );
+        let only_cert = FormValues {
+            ssl_cert: fixture("client.pem"),
+            ..values("secure")
+        };
+        assert_eq!(
+            validate(&only_cert, None, &[]).unwrap_err(),
+            "SSL key is required with an SSL cert"
+        );
+        let missing_ca = FormValues {
+            ssl_mode: SslMode::VerifyCa,
+            ssl_ca: "~/cooper-no-such-dir/ca.pem".into(),
+            ..values("secure")
+        };
+        assert_eq!(
+            validate(&missing_ca, None, &[]).unwrap_err(),
+            "CA cert file not found: ~/cooper-no-such-dir/ca.pem"
+        );
+        let directory = FormValues {
+            ssl_key: fixture(""),
+            ssl_cert: fixture("client.pem"),
+            ..values("secure")
+        };
+        assert!(
+            validate(&directory, None, &[])
+                .unwrap_err()
+                .starts_with("SSL key file not found: ")
+        );
+    }
+
+    #[test]
+    fn disabling_ssl_drops_the_files() {
+        let v = FormValues {
+            ssl_mode: SslMode::Disable,
+            ssl_key: "/missing/client.key".into(),
+            ssl_ca: "/missing/ca.pem".into(),
+            ..values("plain")
+        };
+        let (conn, _) = validate(&v, None, &[]).unwrap();
+        assert_eq!(conn.ssl_mode, SslMode::Disable);
+        assert!(conn.ssl_key.is_empty() && conn.ssl_cert.is_empty() && conn.ssl_ca.is_empty());
+    }
+
+    #[test]
+    fn ssl_mode_labels_map_back_to_modes() {
+        for (label, mode) in ssl_mode_labels().into_iter().zip(SslMode::ALL) {
+            assert_eq!(ssl_mode_of(label), Some(mode));
+        }
+        assert_eq!(
+            ssl_mode_labels(),
+            ["Disable", "Prefer", "Require", "Verify CA", "Verify Full"]
+        );
+        assert_eq!(ssl_mode_of("x"), None);
     }
 }

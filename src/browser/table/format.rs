@@ -1,7 +1,7 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    db::{self, ColumnDef, ColumnInfo, Page, TableKind},
+    db::{self, ColumnDef, ColumnInfo, KeySource, Page, RowKey, TableKind},
     ui::group,
 };
 
@@ -116,6 +116,49 @@ pub fn kind_label(kind: TableKind) -> Option<&'static str> {
     }
 }
 
+pub fn column_list(columns: &[String]) -> String {
+    columns
+        .iter()
+        .map(|column| db::render_text(column))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn key_chip(key: &RowKey, chosen: Option<&[String]>) -> Option<(String, String)> {
+    let columns = || column_list(&key.columns);
+    let (label, help) = match &key.source {
+        KeySource::Primary => return None,
+        KeySource::Unique(index) => (
+            format!("key: {} (unique)", columns()),
+            format!(
+                "Rows are found by the unique index {}",
+                db::render_text(index)
+            ),
+        ),
+        KeySource::RowId => (
+            format!("key: {}", columns()),
+            "Rows are found by SQLite's row id".to_string(),
+        ),
+        KeySource::Ctid => (
+            "key: ctid".to_string(),
+            "Rows are found by their place on disk (ctid) and version (xmin), which change \
+             when a row is saved"
+                .to_string(),
+        ),
+        KeySource::None => match chosen {
+            Some(chosen) => (
+                format!("key: {} (chosen)", column_list(chosen)),
+                "Rows are found by the columns you chose. Click to change them".to_string(),
+            ),
+            None => (
+                "no key".to_string(),
+                "No primary key, unique index or row id. Click to choose key columns".to_string(),
+            ),
+        },
+    };
+    Some((label, help))
+}
+
 pub fn record_footer(offset: u64, row: usize) -> String {
     format!("row {}", group(offset + row as u64 + 1))
 }
@@ -154,10 +197,10 @@ pub fn copied(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_COLUMN_WIDTH, column_widths, copied, definition, gutter_width, normalize, page_footer,
-        record_footer, row_copy_text, wrap,
+        MAX_COLUMN_WIDTH, column_widths, copied, definition, gutter_width, key_chip, normalize,
+        page_footer, record_footer, row_copy_text, wrap,
     };
-    use crate::db::{ColumnDef, ColumnInfo, FullValue, FullValues, Page};
+    use crate::db::{ColumnDef, ColumnInfo, FullValue, FullValues, KeySource, Page, RowKey};
 
     fn column(name: &str, type_name: &str) -> ColumnInfo {
         ColumnInfo {
@@ -183,9 +226,9 @@ mod tests {
                 .collect(),
             full: FullValues::new(),
             opaque: Default::default(),
-            primary_key: Vec::new(),
             offset,
             has_more,
+            ..Page::default()
         }
     }
 
@@ -310,5 +353,44 @@ mod tests {
         assert_eq!(copied("hello"), "Copied 5 characters");
         assert_eq!(copied(""), "Copied 0 characters");
         assert_eq!(copied("a\nb\nc"), "Copied 3 lines");
+    }
+
+    #[test]
+    fn the_key_chip_names_how_rows_are_found() {
+        let key = |source: KeySource, columns: &[&str]| RowKey {
+            source,
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+        };
+        assert_eq!(key_chip(&key(KeySource::Primary, &["id"]), None), None);
+        assert_eq!(
+            key_chip(
+                &key(KeySource::Unique("t_code".into()), &["code", "at"]),
+                None
+            ),
+            Some((
+                "key: code, at (unique)".to_string(),
+                "Rows are found by the unique index t_code".to_string()
+            ))
+        );
+        assert_eq!(
+            key_chip(&key(KeySource::RowId, &["_rowid_"]), None).map(|chip| chip.0),
+            Some("key: _rowid_".to_string())
+        );
+        let (label, help) =
+            key_chip(&key(KeySource::Ctid, &["tableoid", "ctid", "xmin"]), None).unwrap();
+        assert_eq!(label, "key: ctid");
+        assert!(help.contains("(xmin)"), "{help}");
+        let (label, help) = key_chip(&RowKey::default(), None).unwrap();
+        assert_eq!(label, "no key");
+        assert!(help.ends_with("Click to choose key columns"), "{help}");
+        let chosen = ["at".to_string(), "msg".to_string()];
+        let (label, help) = key_chip(&RowKey::default(), Some(&chosen)).unwrap();
+        assert_eq!(label, "key: at, msg (chosen)");
+        assert!(help.ends_with("Click to change them"), "{help}");
+        assert_eq!(
+            key_chip(&key(KeySource::RowId, &["rowid"]), Some(&chosen)).map(|chip| chip.0),
+            Some("key: rowid".to_string()),
+            "a key of its own wins"
+        );
     }
 }

@@ -235,7 +235,7 @@ fn a_save_that_slips_through_is_refused_before_it_reaches_the_database() {
         b.session.update_row(crate::db::RowUpdate {
             schema: "main".into(),
             table: "customers".into(),
-            key: vec![("id".into(), "2".into())],
+            key: vec![("id".into(), Some("2".into()))],
             values: vec![("name".into(), Some("Renamed".into()))],
         })
     });

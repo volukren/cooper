@@ -9,22 +9,23 @@ color-eyre = "0.6.5"
 dirs = "7.0.0"
 fontique = { version = "0.12.0", default-features = false, features = ["std", "system", "fontconfig-dlopen"] }
 futures-util = { version = "0.3.34", default-features = false }
+getrandom = "0.4.3"
 keyring = "4.2.0"
 mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "native-tls"] }
 native-tls = "0.2.18"
+p12-keystore = { version = "0.4.1", default-features = false }
+pem = "4.0.0"
 postgres-native-tls = "0.5.3"
 read-fonts = "0.41.0"
 rune = { git = "https://github.com/anomalyco/rune", rev = "d6715352fb0cb3ab3551853c3ba92a7995a9bce5", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "d6715352fb0cb3ab3551853c3ba92a7995a9bce5" }
-rusqlite = { version = "0.42.0", features = ["bundled", "column_decltype", "hooks"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "column_decltype", "column_metadata", "hooks"] }
 serde = { version = "1.0.229", features = ["derive"] }
+tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "time"] }
 tokio-postgres = "0.7.18"
 toml_edit = { version = "0.25.19", features = ["serde"] }
 unicode-width = "0.2.3"
-
-[dev-dependencies]
-tempfile = "3.27.0"
 
 [patch.crates-io]
 winit = { git = "https://github.com/anomalyco/rune", rev = "d6715352fb0cb3ab3551853c3ba92a7995a9bce5" }

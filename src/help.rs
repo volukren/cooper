@@ -138,7 +138,15 @@ const SECTIONS: &[Section] = &[
                 "Keep the password in the system keychain or in the config",
             ),
             b(&[T("Eye button")], "Show or hide the password"),
-            b(&[T("Browse…")], "Pick the SQLite database file"),
+            b(
+                &[T("SSL mode menu")],
+                "Disable, Prefer, Require, Verify CA (checks the server certificate) or \
+                 Verify Full (also checks the host name)",
+            ),
+            b(
+                &[T("Browse…")],
+                "Pick the SQLite database file, or the SSL key, SSL cert or CA cert file",
+            ),
             b(&[K("enter")], "Save the connection (from any field)"),
             b(&[K("escape")], "Cancel and close the form"),
         ],
@@ -183,7 +191,7 @@ const SECTIONS: &[Section] = &[
             b(&[c(CopyCell)], "Copy the selected cell (grid, result)"),
             b(
                 &[c(EditRow)],
-                "Edit the selected value in the row view (tables with a primary key)",
+                "Edit the selected value in the row view (tables, not views)",
             ),
             b(
                 &[c(CopyRow)],
@@ -229,6 +237,15 @@ const SECTIONS: &[Section] = &[
                 "Save the changed values (only if the row is still there)",
             ),
             b(&[c(CancelEdit)], "Throw the changes away"),
+            b(
+                &[T("Row key")],
+                "Rows are found by the primary key, a unique NOT NULL index or the row id; for \
+                 other tables, choose the key columns",
+            ),
+            b(
+                &[c(ChooseKey), T("Key chip")],
+                "Choose, change or forget the key columns of a table without its own key",
+            ),
             b(
                 &[T("Production")],
                 "Saving asks to confirm first on a connection tagged Production",

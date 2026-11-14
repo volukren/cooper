@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use super::*;
-use crate::connection::PasswordStorage;
+use crate::connection::{PasswordStorage, SslMode};
 
 const USERS: &str = "Users";
 const EMPTY: &str = "empty";
@@ -25,6 +25,10 @@ fn connection(kind: DbKind, port: Option<u16>, user: &str, database: &str) -> Co
         database: database.to_string(),
         password_storage: PasswordStorage::Keychain,
         password: String::new(),
+        ssl_mode: SslMode::default(),
+        ssl_key: String::new(),
+        ssl_cert: String::new(),
+        ssl_ca: String::new(),
     }
 }
 
@@ -402,16 +406,26 @@ fn builds_safe_statements() {
     assert!(qualified(DbKind::Sqlite, "main", "").is_err());
 
     assert_eq!(
-        select_sql(DbKind::Sqlite, "main", "t", &[], 0, 100).unwrap(),
+        select_sql(DbKind::Sqlite, "main", "t", &[], &[], 0, 100).unwrap(),
         "SELECT * FROM \"main\".\"t\" LIMIT 101 OFFSET 0"
     );
     let pk = ["b`x".to_string(), "a".to_string()];
     assert_eq!(
-        select_sql(DbKind::MySql, "db", "t", &pk, 300, 100).unwrap(),
+        select_sql(DbKind::MySql, "db", "t", &[], &pk, 300, 100).unwrap(),
         "SELECT * FROM `db`.`t` ORDER BY `b``x`, `a` LIMIT 101 OFFSET 300"
     );
+    let hidden = ["ro\"wid".to_string()];
     assert_eq!(
-        select_sql(DbKind::Postgres, "s", "t", &[], u64::MAX, u32::MAX).unwrap(),
+        select_sql(DbKind::Sqlite, "main", "t", &hidden, &hidden, 0, 10).unwrap(),
+        "SELECT *, \"ro\"\"wid\" FROM \"main\".\"t\" ORDER BY \"ro\"\"wid\" LIMIT 11 OFFSET 0"
+    );
+    let system = ["tableoid".to_string(), "ctid".to_string()];
+    assert_eq!(
+        select_sql(DbKind::Postgres, "s", "t", &system, &[], 0, 10).unwrap(),
+        "SELECT *, \"tableoid\", \"ctid\" FROM \"s\".\"t\" LIMIT 11 OFFSET 0"
+    );
+    assert_eq!(
+        select_sql(DbKind::Postgres, "s", "t", &[], &[], u64::MAX, u32::MAX).unwrap(),
         format!(
             "SELECT * FROM \"s\".\"t\" LIMIT {} OFFSET {}",
             u64::from(u32::MAX) + 1,
@@ -430,7 +444,7 @@ fn row_update(table: &str, key: &[(&str, &str)], values: &[(&str, Option<&str>)]
         table: table.to_string(),
         key: key
             .iter()
-            .map(|(c, v)| (c.to_string(), v.to_string()))
+            .map(|(c, v)| (c.to_string(), Some(v.to_string())))
             .collect(),
         values: values
             .iter()
@@ -454,8 +468,8 @@ fn builds_update_statements() {
         schema: "my db".to_string(),
         table: r#"t`"x"#.to_string(),
         key: vec![
-            ("b`k".to_string(), "1".to_string()),
-            ("a".to_string(), "x'y".to_string()),
+            ("b`k".to_string(), Some("1".to_string())),
+            ("a".to_string(), Some("x'y".to_string())),
         ],
         values: vec![
             ("name".to_string(), Some("it's".to_string())),
@@ -478,6 +492,24 @@ fn builds_update_statements() {
         r#"UPDATE "my db"."t`""x" SET "name" = 'it''s', "note" = NULL WHERE "b`k" = '1' AND "a" = 'x''y'"#
     );
 
+    let mut nullable = edit.clone();
+    nullable.key[0].1 = None;
+    assert_eq!(
+        update_sql(DbKind::MySql, &nullable, placeholder).unwrap(),
+        r#"UPDATE `my db`.`t``"x` SET `name` = ?, `note` = NULL WHERE `b``k` IS NULL AND `a` = ?"#
+    );
+    assert_eq!(
+        update_params(&nullable),
+        ["it's", "x'y"],
+        "NULL is not bound"
+    );
+    assert_eq!(
+        update_sql(DbKind::Postgres, &nullable, |v| v
+            .map_or_else(|| "NULL".into(), pg_literal))
+        .unwrap(),
+        r#"UPDATE "my db"."t`""x" SET "name" = 'it''s', "note" = NULL WHERE "b`k" IS NULL AND "a" = 'x''y'"#
+    );
+
     let mut nothing = edit.clone();
     nothing.values.clear();
     assert!(update_sql(DbKind::Postgres, &nothing, placeholder).is_err());
@@ -487,6 +519,242 @@ fn builds_update_statements() {
     let mut nul = edit;
     nul.table = "a\0b".to_string();
     assert!(update_sql(DbKind::Postgres, &nul, placeholder).is_err());
+}
+
+#[test]
+fn a_many_rows_failure_starts_with_the_hint_prefix() {
+    let failure = matched_one(2).unwrap_err();
+    assert_eq!(
+        failure.message,
+        "the row's key matches 2 rows (nothing was saved)"
+    );
+    assert!(failure.message.starts_with(MANY_ROWS));
+    assert!(matched_one(1).is_ok());
+}
+
+#[test]
+fn fields_have_an_exact_value_unless_opaque_or_cut() {
+    assert_eq!(Field::text("plain").exact().as_deref(), Some("plain"));
+    assert_eq!(Field::text("a\nb").exact().as_deref(), Some("a\nb"));
+    assert_eq!(Field::default().exact(), None, "NULL");
+    assert_eq!(Field::opaque("0x00".to_string()).exact(), None);
+    let long = "\n".repeat(MAX_FULL_BYTES + 1);
+    assert_eq!(Field::text(&long).exact(), None, "cut");
+}
+
+#[test]
+fn invalid_utf8_text_in_sqlite_is_opaque() {
+    use rusqlite::types::ValueRef;
+    let field = sqlite_render(ValueRef::Text(b"ok\xff"));
+    assert!(field.opaque);
+    assert_eq!(field.shown.as_deref(), Some("ok\u{fffd}"));
+    assert!(!sqlite_render(ValueRef::Text("ю".as_bytes())).opaque);
+
+    let long = b"caf\xe9 line\n".repeat(400);
+    let field = sqlite_render(ValueRef::Text(&long));
+    let text = String::from_utf8_lossy(&long).into_owned();
+    assert!(field.opaque);
+    assert_eq!(
+        field
+            .full
+            .as_ref()
+            .map(|full| (full.text.as_str(), full.truncated)),
+        Some((text.as_str(), false)),
+        "copy and the row view still get the whole text"
+    );
+    assert!(field.shown.unwrap().chars().count() <= MAX_CELL_CHARS + 1);
+    let field = sqlite_render(ValueRef::Text(&long));
+    assert_eq!(field.exact(), None, "never a key nor written back");
+}
+
+#[test]
+fn comparable_types_exclude_inexact_ones() {
+    for (kind, type_name, expected) in [
+        (DbKind::Postgres, "integer", true),
+        (DbKind::Postgres, "character varying(20)", true),
+        (DbKind::Postgres, "timestamp with time zone", true),
+        (DbKind::Postgres, "numeric(10,2)", true),
+        (DbKind::Postgres, "", true),
+        (DbKind::Postgres, "json", false),
+        (DbKind::Postgres, "JSON[]", false),
+        (DbKind::Postgres, "jsonb", true),
+        (DbKind::Postgres, "double precision", false),
+        (DbKind::Postgres, "real", false),
+        (DbKind::Postgres, "bytea", false),
+        (DbKind::Postgres, "point", false),
+        (DbKind::Postgres, "xml", false),
+        (DbKind::MySql, "int(11) unsigned", true),
+        (DbKind::MySql, "varchar(20)", true),
+        (DbKind::MySql, "decimal(10,2)", true),
+        (DbKind::MySql, "float unsigned", false),
+        (DbKind::MySql, "double", false),
+        (DbKind::MySql, "json", false),
+        (DbKind::MySql, "bit(1)", false),
+        (DbKind::MySql, "varbinary(16)", false),
+        (DbKind::MySql, "longblob", false),
+        (DbKind::MySql, "geometry", false),
+        (DbKind::MySql, "vector(3)", false),
+        (DbKind::Sqlite, "", false),
+        (DbKind::Sqlite, "integer", true),
+        (DbKind::Sqlite, "bigint", true),
+        (DbKind::Sqlite, "varchar(10)", true),
+        (DbKind::Sqlite, "clob", true),
+        (DbKind::Sqlite, "text", true),
+        (DbKind::Sqlite, "blob", false),
+        (DbKind::Sqlite, "real", false),
+        (DbKind::Sqlite, "float", false),
+        (DbKind::Sqlite, "double", false),
+        (DbKind::Sqlite, "numeric", true),
+        (DbKind::Sqlite, "date", true),
+        (DbKind::Sqlite, "ANY", false),
+        (DbKind::Sqlite, "company", true),
+    ] {
+        assert_eq!(
+            comparable(kind, type_name),
+            expected,
+            "{kind:?} {type_name:?}"
+        );
+    }
+}
+
+fn index(name: &str, primary: bool, columns: &[&str], usable: bool) -> IndexKey {
+    IndexKey {
+        name: name.to_string(),
+        primary,
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        usable,
+    }
+}
+
+#[test]
+fn the_primary_key_wins_then_the_smallest_usable_unique_index() {
+    let unique = |name: &str, columns: &[&str]| RowKey {
+        source: KeySource::Unique(name.to_string()),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+    };
+    assert_eq!(choose_key(Vec::new()), None);
+    assert_eq!(
+        choose_key(vec![
+            index("a_one", false, &["x"], true),
+            index("pk", true, &["b", "a"], false),
+        ]),
+        Some(RowKey {
+            source: KeySource::Primary,
+            columns: vec!["b".to_string(), "a".to_string()],
+        })
+    );
+    assert_eq!(
+        choose_key(vec![
+            index("wide", false, &["a", "b"], true),
+            index("z_one", false, &["z"], true),
+            index("b_one", false, &["y"], true),
+        ]),
+        Some(unique("b_one", &["y"]))
+    );
+    assert_eq!(
+        choose_key(vec![
+            index("a_nullable", false, &["n"], false),
+            index("wide", false, &["a", "b"], true),
+        ]),
+        Some(unique("wide", &["a", "b"]))
+    );
+    assert_eq!(
+        choose_key(vec![index("unusable", false, &["n"], false)]),
+        None
+    );
+}
+
+#[test]
+fn groups_postgres_index_rows_into_keys() {
+    let rows: Vec<Vec<String>> = [
+        ["pair", "false", "b", "true", "text"],
+        ["pair", "false", "a", "true", "integer"],
+        ["t_pkey", "true", "id", "true", "bigint"],
+        ["by_doc", "false", "doc", "true", "double precision"],
+        ["by_note", "false", "note", "false", "text"],
+        ["by_note", "false", "id", "true", "bigint"],
+    ]
+    .iter()
+    .map(|row| row.iter().map(|f| f.to_string()).collect())
+    .collect();
+    assert_eq!(
+        pg_index_keys(rows),
+        [
+            index("pair", false, &["b", "a"], true),
+            index("t_pkey", true, &["id"], true),
+            index("by_doc", false, &["doc"], false),
+            index("by_note", false, &["note", "id"], false),
+        ]
+    );
+    assert_eq!(pg_index_keys(vec![vec!["short".to_string()]]), []);
+}
+
+#[test]
+fn reads_the_postgres_relation_with_its_index_rows() {
+    let rows = |rows: &[&[&str]]| -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|f| f.to_string()).collect())
+            .collect()
+    };
+    let relation = pg_relation(rows(&[
+        &["r", "true", "a_key", "false", "code", "true", "text"],
+        &["r", "true", "t_pkey", "true", "id", "true", "integer"],
+    ]))
+    .unwrap();
+    assert_eq!((relation.kind.as_str(), relation.children), ("r", true));
+    assert_eq!(
+        relation.index_keys,
+        [
+            index("a_key", false, &["code"], true),
+            index("t_pkey", true, &["id"], true)
+        ]
+    );
+
+    let bare = pg_relation(rows(&[&["v", "false", "", "", "", "", ""]])).unwrap();
+    assert_eq!((bare.kind.as_str(), bare.children), ("v", false));
+    assert_eq!(bare.index_keys, [], "no index: one row of empty fields");
+    assert!(pg_relation(Vec::new()).is_none(), "no such relation");
+}
+
+#[test]
+fn groups_mysql_index_rows_into_keys() {
+    let columns: Vec<MyColumn> = [
+        ("id", "bigint unsigned", false),
+        ("Code", "varchar(20)", true),
+        ("f", "float", false),
+        ("note", "text", false),
+    ]
+    .into_iter()
+    .map(|(name, type_name, invisible)| MyColumn {
+        name: name.to_string(),
+        type_name: type_name.to_string(),
+        invisible,
+    })
+    .collect();
+    let rows: Vec<Vec<String>> = [
+        ["by_code", "code", ""],
+        ["by_code", "id", ""],
+        ["by_expr", "", ""],
+        ["by_f", "f", ""],
+        ["by_note", "note", "YES"],
+        ["gone", "missing", ""],
+        ["PRIMARY", "id", ""],
+    ]
+    .iter()
+    .map(|row| row.iter().map(|f| f.to_string()).collect())
+    .collect();
+    assert_eq!(
+        my_index_keys(rows, &columns),
+        [
+            index("by_code", false, &["code", "id"], true),
+            index("by_expr", false, &[""], false),
+            index("by_f", false, &["f"], false),
+            index("by_note", false, &["note"], false),
+            index("gone", false, &["missing"], false),
+            index("PRIMARY", true, &["id"], true),
+        ]
+    );
+    assert_eq!(my_index_keys(vec![vec!["short".to_string()]], &columns), []);
 }
 
 #[test]
@@ -841,6 +1109,7 @@ fn sqlite_orders_by_primary_key_and_renders_values() {
     let kinds = page(&session, "main", "kinds", 0, 100);
     let types: Vec<&str> = kinds.columns.iter().map(|c| c.type_name.as_str()).collect();
     assert_eq!(types, ["integer", "real", "text", "blob", ""]);
+    assert_eq!(kinds.comparable, [true, false, true, false, false]);
     assert_eq!(
         kinds.rows[0],
         [
@@ -872,13 +1141,268 @@ fn sqlite_pages_carry_the_key_and_the_opaque_cells() {
     let (_dir, path) = seeded_sqlite();
     let session = Session::spawn(sqlite_connection(&path), None);
     let users = page(&session, "main", USERS, 0, 3);
-    assert_eq!(users.primary_key, ["id"]);
+    assert_eq!(users.key.source, KeySource::Primary);
+    assert_eq!(users.key.columns, ["id"]);
+    assert!(users.hidden.is_empty() && users.ids.is_empty());
     let mut opaque: Vec<_> = users.opaque.iter().copied().collect();
     opaque.sort();
     assert_eq!(opaque, [(0, 3), (1, 3), (2, 3)], "the BLOB column only");
-    assert_eq!(page(&session, "main", "pair", 0, 3).primary_key, ["b", "a"]);
-    assert!(page(&session, "main", "no_pk", 0, 3).primary_key.is_empty());
-    assert!(page(&session, "main", VIEW, 0, 3).primary_key.is_empty());
+    let pair = page(&session, "main", "pair", 0, 3);
+    assert_eq!(pair.key.source, KeySource::Primary);
+    assert_eq!(pair.key.columns, ["b", "a"]);
+
+    let row_id = RowKey {
+        source: KeySource::RowId,
+        columns: vec!["rowid".to_string()],
+    };
+    let no_pk = page(&session, "main", "no_pk", 0, 3);
+    assert_eq!(no_pk.key, row_id);
+    assert_eq!(no_pk.hidden, ["rowid"]);
+    let names: Vec<&str> = no_pk.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["v"], "the row id is not a column");
+    assert_eq!(no_pk.comparable, [true]);
+    assert_eq!(
+        no_pk.rows,
+        cells(&[&[Some("b")], &[Some("a")], &[Some("c")]])
+    );
+    assert_eq!(
+        no_pk.ids,
+        cells(&[&[Some("1")], &[Some("2")], &[Some("3")]])
+    );
+    assert!(no_pk.full.is_empty() && no_pk.opaque.is_empty());
+    assert_eq!(
+        page(&session, "main", "indexed", 0, 3).key,
+        row_id,
+        "a UNIQUE column that may be NULL is no key"
+    );
+
+    let view = page(&session, "main", VIEW, 0, 3);
+    assert_eq!(view.key, RowKey::default());
+    assert!(view.hidden.is_empty() && view.ids.is_empty());
+}
+
+fn sqlite_with(script: &str) -> (tempfile::TempDir, std::path::PathBuf, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keys.sqlite");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(script)
+        .unwrap();
+    let session = Session::spawn(sqlite_connection(&path), None);
+    (dir, path, session)
+}
+
+#[test]
+fn sqlite_finds_rows_by_a_unique_key_or_the_row_id() {
+    let (_dir, _path, session) = sqlite_with(
+        "CREATE TABLE uniq (code TEXT NOT NULL UNIQUE, v TEXT);
+         INSERT INTO uniq VALUES ('b', '1'), ('a', '2');
+         CREATE TABLE untyped (code NOT NULL UNIQUE, v TEXT);
+         CREATE TABLE partial (code TEXT NOT NULL, v TEXT);
+         CREATE UNIQUE INDEX partial_code ON partial (code) WHERE v IS NOT NULL;
+         CREATE TABLE expression (code TEXT NOT NULL, v TEXT);
+         CREATE UNIQUE INDEX expression_code ON expression (lower(code));
+         CREATE TABLE pair (a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL, v TEXT,
+                            UNIQUE (b, a), UNIQUE (c));
+         CREATE TABLE sh1 (rowid TEXT, v TEXT);
+         INSERT INTO sh1 VALUES ('mine', 'x');
+         CREATE TABLE sh3 (rowid TEXT, _RowId_ TEXT, OID TEXT, v TEXT);
+         CREATE TABLE nocase (code TEXT NOT NULL COLLATE NOCASE UNIQUE, v TEXT);
+         CREATE TABLE binary (code TEXT NOT NULL COLLATE NOCASE, v TEXT);
+         CREATE UNIQUE INDEX binary_code ON binary (code COLLATE BINARY);
+         INSERT INTO binary VALUES ('a', '1'), ('A', '2');",
+    );
+    let key = |source: KeySource, columns: &[&str]| RowKey {
+        source,
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+    };
+
+    let uniq = page(&session, "main", "uniq", 0, 10);
+    assert_eq!(
+        uniq.key,
+        key(
+            KeySource::Unique("sqlite_autoindex_uniq_1".to_string()),
+            &["code"]
+        )
+    );
+    assert!(uniq.hidden.is_empty() && uniq.ids.is_empty());
+    assert_eq!(
+        uniq.rows,
+        cells(&[&[Some("a"), Some("2")], &[Some("b"), Some("1")]]),
+        "ordered by the key"
+    );
+    assert_eq!(
+        page(&session, "main", "pair", 0, 10).key,
+        key(
+            KeySource::Unique("sqlite_autoindex_pair_2".to_string()),
+            &["c"]
+        ),
+        "the smallest index"
+    );
+    assert_eq!(
+        page(&session, "main", "nocase", 0, 10).key,
+        key(
+            KeySource::Unique("sqlite_autoindex_nocase_1".to_string()),
+            &["code"]
+        ),
+        "the index compares like the column"
+    );
+    for table in ["untyped", "partial", "expression", "binary"] {
+        assert_eq!(
+            page(&session, "main", table, 0, 10).key,
+            key(KeySource::RowId, &["rowid"]),
+            "{table}"
+        );
+    }
+
+    let sh1 = page(&session, "main", "sh1", 0, 10);
+    assert_eq!(sh1.key, key(KeySource::RowId, &["_rowid_"]));
+    assert_eq!(sh1.hidden, ["_rowid_"]);
+    assert_eq!(sh1.columns.len(), 2);
+    assert_eq!(sh1.rows, cells(&[&[Some("mine"), Some("x")]]));
+    assert_eq!(sh1.ids, cells(&[&[Some("1")]]));
+
+    let sh3 = page(&session, "main", "sh3", 0, 10);
+    assert_eq!(sh3.key, RowKey::default());
+    assert!(sh3.hidden.is_empty() && sh3.ids.is_empty());
+    assert_eq!(sh3.columns.len(), 4);
+}
+
+fn edit_row(page: &Page, row: usize, column: &str, value: Option<&str>) -> RowUpdate {
+    use crate::browser::table::edit;
+    let target = edit::target(page, row, TableKind::Table, None).unwrap();
+    let mut values: Vec<Option<String>> = target
+        .fields
+        .iter()
+        .map(|field| field.original.clone())
+        .collect();
+    let at = target.fields.iter().position(|f| f.name == column).unwrap();
+    values[at] = value.map(str::to_string);
+    target.update(&values).unwrap()
+}
+
+#[test]
+fn sqlite_updates_rows_by_their_row_id_or_unique_key() {
+    let (_dir, path, session) = sqlite_with(
+        "CREATE TABLE log (at INTEGER, msg TEXT, note TEXT, n);
+         INSERT INTO log VALUES (1, 'same', NULL, 0), (1, 'same', NULL, 0), (2, 'other', 'x', 0);
+         CREATE TABLE sh1 (rowid TEXT, v TEXT);
+         INSERT INTO sh1 VALUES ('mine', 'a'), ('yours', 'b');
+         CREATE TABLE uniq (code TEXT NOT NULL UNIQUE, v TEXT);
+         INSERT INTO uniq VALUES ('a', '1'), ('b', '2');
+         CREATE TABLE strict_any (v ANY, w TEXT) STRICT;
+         INSERT INTO strict_any VALUES (5, 'a');
+         CREATE TABLE bare (a, b);
+         INSERT INTO bare VALUES (2, 'q');",
+    );
+    let read = |sql: &str| -> Vec<Vec<Option<String>>> {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let mut statement = db.prepare(sql).unwrap();
+        let width = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..width)
+                    .map(|i| row.get_ref(i).map(|value| sqlite_render(value).shown))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let write = |sql: &str| {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap()
+    };
+
+    let log = page(&session, "main", "log", 0, 10);
+    let edit = edit_row(&log, 1, "msg", Some("edited"));
+    let key: Vec<(&str, Option<&str>)> = edit
+        .key
+        .iter()
+        .map(|(c, v)| (c.as_str(), v.as_deref()))
+        .collect();
+    assert_eq!(
+        key,
+        [
+            ("rowid", Some("2")),
+            ("at", Some("1")),
+            ("msg", Some("same")),
+            ("note", None)
+        ],
+        "not n, which has no type to compare by"
+    );
+    update(&session, edit).unwrap();
+    assert_eq!(
+        read("SELECT rowid, msg FROM log ORDER BY rowid"),
+        cells(&[
+            &[Some("1"), Some("same")],
+            &[Some("2"), Some("edited")],
+            &[Some("3"), Some("other")]
+        ]),
+        "one of two identical rows"
+    );
+
+    let stale = edit_row(&log, 0, "msg", Some("stale"));
+    write("UPDATE log SET at = 5 WHERE rowid = 1");
+    let gone = update(&session, stale).unwrap_err();
+    assert!(gone.contains("not found"), "{gone}");
+
+    let log = page(&session, "main", "log", 0, 10);
+    let reused = edit_row(&log, 2, "msg", Some("reused"));
+    write("DELETE FROM log WHERE rowid = 3; INSERT INTO log VALUES (9, 'new', 'x', 0)");
+    let gone = update(&session, reused).unwrap_err();
+    assert!(gone.contains("not found"), "{gone}");
+    assert_eq!(
+        read("SELECT rowid, at, msg FROM log WHERE rowid = 3"),
+        cells(&[&[Some("3"), Some("9"), Some("new")]]),
+        "the row that took the row id stays"
+    );
+
+    let sh1 = page(&session, "main", "sh1", 0, 10);
+    update(&session, edit_row(&sh1, 1, "v", Some("changed"))).unwrap();
+    assert_eq!(
+        read("SELECT _rowid_, rowid, v FROM sh1 ORDER BY _rowid_"),
+        cells(&[
+            &[Some("1"), Some("mine"), Some("a")],
+            &[Some("2"), Some("yours"), Some("changed")]
+        ]),
+        "the column named rowid is not the row id"
+    );
+
+    let uniq = page(&session, "main", "uniq", 0, 10);
+    let edit = edit_row(&uniq, 1, "v", Some("changed"));
+    assert_eq!(edit.key, [("code".to_string(), Some("b".to_string()))]);
+    update(&session, edit).unwrap();
+    assert_eq!(
+        read("SELECT code, v FROM uniq ORDER BY code"),
+        cells(&[&[Some("a"), Some("1")], &[Some("b"), Some("changed")]])
+    );
+
+    let strict = page(&session, "main", "strict_any", 0, 10);
+    let edit = edit_row(&strict, 0, "w", Some("changed"));
+    assert_eq!(
+        edit.key,
+        [
+            ("rowid".to_string(), Some("1".to_string())),
+            ("w".to_string(), Some("a".to_string()))
+        ],
+        "a stored 5 is not '5' in a STRICT ANY column"
+    );
+    update(&session, edit).unwrap();
+    assert_eq!(
+        read("SELECT v, w FROM strict_any"),
+        cells(&[&[Some("5"), Some("changed")]])
+    );
+
+    use crate::browser::table::edit;
+    let bare = page(&session, "main", "bare", 0, 10);
+    assert_eq!(
+        edit::target(&bare, 0, TableKind::Table, None).unwrap_err(),
+        edit::Refusal::Reason(edit::NO_FINGERPRINT.to_string()),
+        "nothing guards the row id against reuse"
+    );
 }
 
 #[test]
@@ -1570,7 +2094,9 @@ impl Backend for Flaky {
         Ok(TableRows {
             columns: Vec::new(),
             rows: Vec::new(),
-            primary_key: Vec::new(),
+            key: RowKey::default(),
+            hidden: Vec::new(),
+            comparable: Vec::new(),
         })
     }
 
@@ -1807,15 +2333,16 @@ fn result_cell(result: &ScriptResult, row: usize, column: usize) -> Option<Strin
 fn exercise_updates(session: &Session, kind: DbKind, schema: &str) {
     let users = qualified(kind, schema, USERS).unwrap();
     let second = page(session, schema, USERS, 100, 100);
-    assert_eq!(second.primary_key, ["id"]);
+    assert_eq!(second.key.source, KeySource::Primary);
+    assert_eq!(second.key.columns, ["id"]);
     assert!(second.opaque.contains(&(0, 3)), "the bytes are opaque");
     assert!(!second.opaque.contains(&(0, 1)));
-    assert!(page(session, schema, VIEW, 0, 1).primary_key.is_empty());
+    assert_eq!(page(session, schema, VIEW, 0, 1).key, RowKey::default());
 
     let edit = |id: &str, values: &[(&str, Option<&str>)]| RowUpdate {
         schema: schema.to_string(),
         table: USERS.to_string(),
-        key: vec![("id".to_string(), id.to_string())],
+        key: vec![("id".to_string(), Some(id.to_string()))],
         values: values
             .iter()
             .map(|(c, v)| (c.to_string(), v.map(str::to_string)))
@@ -1858,6 +2385,193 @@ fn exercise_updates(session: &Session, kind: DbKind, schema: &str) {
 
     let page = page(session, schema, USERS, 100, 100);
     assert_eq!(page.rows[96][1].as_deref(), Some("edited"));
+}
+
+fn pg_key_statements(schema: &str) -> Vec<String> {
+    let t = |name: &str| qualified(DbKind::Postgres, schema, name).unwrap();
+    vec![
+        format!(
+            "CREATE TABLE {} (code text NOT NULL UNIQUE, v int)",
+            t("uq")
+        ),
+        format!("INSERT INTO {} VALUES ('b', 2), ('a', 1)", t("uq")),
+        format!(
+            "CREATE TABLE {} (id int, note text, PRIMARY KEY (id) INCLUDE (note))",
+            t("inc")
+        ),
+        format!("CREATE TABLE {} (a int, b bytea)", t("bin")),
+        format!("INSERT INTO {} VALUES (1, '\\xdead')", t("bin")),
+        format!("CREATE TABLE {} (a int)", t("par")),
+        format!("CREATE TABLE {} () INHERITS ({})", t("kid"), t("par")),
+        format!("INSERT INTO {} VALUES (1)", t("par")),
+        format!("INSERT INTO {} VALUES (1)", t("kid")),
+        format!("CREATE TABLE {} (id int PRIMARY KEY, v text)", t("ppk")),
+        format!("CREATE TABLE {} () INHERITS ({})", t("kpk"), t("ppk")),
+        format!("INSERT INTO {} VALUES (1, 'parent')", t("ppk")),
+        format!("INSERT INTO {} VALUES (1, 'child')", t("kpk")),
+        format!("CREATE TABLE {} (code text UNIQUE, v int)", t("nn")),
+        format!(
+            "INSERT INTO {} VALUES (NULL, 1), (NULL, 2), ('a', 3)",
+            t("nn")
+        ),
+        format!(
+            "INSERT INTO {} VALUES ('2024-03-01', 1), ('2024-04-01', 2)",
+            t("parted")
+        ),
+    ]
+}
+
+fn exercise_pg_row_keys(session: &Session, schema: &str) {
+    let t = |name: &str| qualified(DbKind::Postgres, schema, name).unwrap();
+    let names = |list: &[&str]| -> Vec<String> { list.iter().map(|n| n.to_string()).collect() };
+    let ctid = RowKey {
+        source: KeySource::Ctid,
+        columns: names(&["tableoid", "ctid", "xmin"]),
+    };
+    let rows = |sql: &str| script(session, sql, 10).unwrap().rows;
+    let oid = |name: &str| rows(&format!("SELECT '{}'::regclass::oid", t(name)))[0][0].clone();
+    let load = |name: &str| {
+        let page = page(session, schema, name, 0, 100);
+        for system in ["tableoid", "ctid", "xmin"] {
+            assert!(
+                page.columns.iter().all(|c| c.name != system),
+                "{name} shows {system}"
+            );
+        }
+        if !page.hidden.is_empty() {
+            assert_eq!(page.ids.len(), page.rows.len());
+        }
+        page
+    };
+
+    rows(&format!(
+        "INSERT INTO {} VALUES (7, 'same'), (7, 'same')",
+        t(EMPTY)
+    ));
+    let empty = load(EMPTY);
+    assert_eq!(empty.key, ctid);
+    assert_eq!(empty.hidden, ctid.columns);
+    assert_eq!(empty.columns.len(), 2);
+    update(session, edit_row(&empty, 1, "b", Some("edited"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT a, b FROM {} ORDER BY b", t(EMPTY))),
+        cells(&[&[Some("7"), Some("edited")], &[Some("7"), Some("same")]]),
+        "only one of the two identical rows changed"
+    );
+
+    let parted = load("parted");
+    assert_eq!(parted.key, ctid);
+    let partition = oid("parted_2024");
+    assert!(parted.ids.iter().all(|ids| ids[0] == partition));
+    let first = parted
+        .rows
+        .iter()
+        .position(|r| r[1].as_deref() == Some("1"));
+    let save = edit_row(&parted, first.unwrap(), "v", Some("10"));
+    update(session, save.clone()).unwrap();
+    let stale = update(session, save).unwrap_err();
+    assert!(stale.contains("not found"), "{stale}");
+    let parted = load("parted");
+    let second = parted
+        .rows
+        .iter()
+        .position(|r| r[1].as_deref() == Some("2"));
+    let save = edit_row(&parted, second.unwrap(), "v", Some("20"));
+    script(
+        session,
+        &format!("UPDATE {} SET v = 2 WHERE v = 2", t("parted")),
+        10,
+    )
+    .unwrap();
+    let concurrent = update(session, save).unwrap_err();
+    assert!(concurrent.contains("not found"), "{concurrent}");
+    assert_eq!(
+        rows(&format!("SELECT v FROM {} ORDER BY v", t("parted"))),
+        cells(&[&[Some("2")], &[Some("10")]])
+    );
+
+    let par = load("par");
+    assert_eq!(par.key, ctid);
+    let kid = oid("kid");
+    let child = par.ids.iter().position(|ids| ids[0] == kid).unwrap();
+    update(session, edit_row(&par, child, "a", Some("2"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT a FROM ONLY {}", t("par"))),
+        cells(&[&[Some("1")]])
+    );
+    assert_eq!(
+        rows(&format!("SELECT a FROM {}", t("kid"))),
+        cells(&[&[Some("2")]])
+    );
+
+    let uq = load("uq");
+    assert_eq!(
+        uq.key,
+        RowKey {
+            source: KeySource::Unique("uq_code_key".to_string()),
+            columns: names(&["code"]),
+        }
+    );
+    assert!(uq.hidden.is_empty() && uq.ids.is_empty());
+    assert_eq!(uq.rows[0][0].as_deref(), Some("a"), "ordered by the key");
+    update(session, edit_row(&uq, 1, "v", Some("22"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT code, v FROM {} ORDER BY code", t("uq"))),
+        cells(&[&[Some("a"), Some("1")], &[Some("b"), Some("22")]])
+    );
+
+    let inc = load("inc");
+    assert_eq!(inc.key, RowKey::primary(names(&["id"])));
+
+    let ppk = load("ppk");
+    assert_eq!(ppk.key, RowKey::primary(names(&["id", "tableoid"])));
+    assert_eq!(ppk.hidden, ["tableoid"]);
+    let kpk = oid("kpk");
+    let child = ppk.ids.iter().position(|ids| ids[0] == kpk).unwrap();
+    update(session, edit_row(&ppk, child, "v", Some("edited"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT v FROM ONLY {}", t("ppk"))),
+        cells(&[&[Some("parent")]])
+    );
+    assert_eq!(
+        rows(&format!("SELECT v FROM {}", t("kpk"))),
+        cells(&[&[Some("edited")]])
+    );
+
+    let not_valid = format!(
+        "ALTER TABLE {} ADD CONSTRAINT nn_code_not_null NOT NULL code NOT VALID",
+        t("nn")
+    );
+    match script(session, &not_valid, 10) {
+        Ok(_) => {
+            assert_eq!(
+                rows(&format!(
+                    "SELECT attnotnull::text FROM pg_attribute \
+                     WHERE attrelid = '{}'::regclass AND attname = 'code'",
+                    t("nn")
+                )),
+                cells(&[&[Some("true")]])
+            );
+            assert_eq!(
+                load("nn").key,
+                ctid,
+                "NULLs are still there, so the unique index can't find one row"
+            );
+        }
+        Err(err) => eprintln!("skipped a NOT VALID NOT NULL (PostgreSQL 18+): {err}"),
+    }
+
+    let bin = load("bin");
+    assert_eq!(bin.key, ctid);
+    assert_eq!(bin.columns[1].type_name, "bytea");
+    assert!(bin.opaque.contains(&(0, 1)), "bytea stays opaque");
+    assert_eq!(bin.rows[0][1].as_deref(), Some("0xdead"));
+
+    for view in [VIEW, "mat"] {
+        let view = load(view);
+        assert_eq!(view.key, RowKey::default());
+        assert!(view.hidden.is_empty() && view.ids.is_empty());
+    }
 }
 
 #[test]
@@ -1907,6 +2621,7 @@ fn postgres_session_browses_database() {
         "CREATE TABLE {quoted}.parted_2024 PARTITION OF {quoted}.parted \
          FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"
     ));
+    statements.extend(pg_key_statements(schema));
     pg_batch(&backend, &statements.join(";\n"));
 
     if let Some(expected) = env_tls("COOPER_TEST_PG_TLS") {
@@ -1921,6 +2636,11 @@ fn postgres_session_browses_database() {
     assert_eq!(
         backend.primary_key(schema, USERS).unwrap(),
         ["id".to_string()]
+    );
+    assert_eq!(
+        backend.identity(schema, "ppk").unwrap().order,
+        ["id", "tableoid"],
+        "rows with the same id in the parent and a child are still in one order"
     );
     drop(backend);
 
@@ -2106,12 +2826,13 @@ fn postgres_session_browses_database() {
     assert_eq!(active, [["0".to_string()]]);
 
     exercise_updates(&session, DbKind::Postgres, schema);
+    exercise_pg_row_keys(&session, schema);
     let typed = RowUpdate {
         schema: schema.to_string(),
         table: "typed".to_string(),
         key: vec![(
             "id".to_string(),
-            "00000000-0000-0000-0000-000000000001".to_string(),
+            Some("00000000-0000-0000-0000-000000000001".to_string()),
         )],
         values: [
             ("j", r#"{"k": 3}"#),
@@ -2222,6 +2943,266 @@ fn exercise_cancellation(session: &Session, kind: DbKind, schema: &str) {
 }
 
 #[test]
+#[ignore = "needs a throwaway PostgreSQL server"]
+fn postgres_ssl_modes() {
+    let base = connection(
+        DbKind::Postgres,
+        Some(env_port("COOPER_TEST_PG_PORT")),
+        "postgres",
+        "postgres",
+    );
+    let password = env_password();
+    let uses_tls = |ssl_mode| {
+        let conn = Connection {
+            ssl_mode,
+            ..base.clone()
+        };
+        let mut backend = PgBackend::connect(&conn, Some(&password))?;
+        let ssl = backend.strings(
+            "SELECT ssl::text FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+            &[],
+        )?;
+        Ok::<_, Failure>(ssl == [["true"]])
+    };
+    assert!(!uses_tls(SslMode::Disable).unwrap());
+    match env_tls("COOPER_TEST_PG_TLS") {
+        Some(true) => {
+            assert!(uses_tls(SslMode::Prefer).unwrap());
+            assert!(uses_tls(SslMode::Require).unwrap());
+            let err = uses_tls(SslMode::VerifyFull).unwrap_err().message;
+            assert!(err.contains("SSL mode Verify Full verifies"), "{err}");
+        }
+        Some(false) => {
+            assert!(!uses_tls(SslMode::Prefer).unwrap());
+            let err = uses_tls(SslMode::Require).unwrap_err().message;
+            assert!(err.contains("server does not support TLS"), "{err}");
+        }
+        None => {}
+    }
+}
+
+#[test]
+#[ignore = "needs a throwaway MySQL server"]
+fn mysql_ssl_modes() {
+    let base = connection(
+        DbKind::MySql,
+        Some(env_port("COOPER_TEST_MYSQL_PORT")),
+        "root",
+        "",
+    );
+    let password = env_password();
+    let uses_tls = |ssl_mode| {
+        let conn = Connection {
+            ssl_mode,
+            ..base.clone()
+        };
+        let mut backend = MyBackend::connect(&conn, Some(&password))?;
+        let status = backend.strings("SHOW STATUS LIKE 'Ssl_cipher'", ())?;
+        Ok::<_, Failure>(!status[0][1].is_empty())
+    };
+    assert!(!uses_tls(SslMode::Disable).unwrap());
+    match env_tls("COOPER_TEST_MYSQL_TLS") {
+        Some(true) => {
+            assert!(uses_tls(SslMode::Prefer).unwrap());
+            assert!(uses_tls(SslMode::Require).unwrap());
+            let err = uses_tls(SslMode::VerifyFull).unwrap_err().message;
+            assert!(err.contains("SSL mode Verify Full verifies"), "{err}");
+        }
+        Some(false) => {
+            assert!(!uses_tls(SslMode::Prefer).unwrap());
+            assert!(uses_tls(SslMode::Require).is_err());
+        }
+        None => {}
+    }
+}
+
+fn my_key_statements(schema: &str) -> Vec<String> {
+    let t = |name: &str| qualified(DbKind::MySql, schema, name).unwrap();
+    vec![
+        "SET SESSION sql_generate_invisible_primary_key = ON".to_string(),
+        format!("CREATE TABLE {} (v VARCHAR(20))", t("gipk")),
+        "SET SESSION sql_generate_invisible_primary_key = OFF".to_string(),
+        format!("INSERT INTO {} (v) VALUES ('a'), ('b')", t("gipk")),
+        format!(
+            "CREATE TABLE {} (code INT NOT NULL INVISIBLE, v TEXT, UNIQUE KEY (code))",
+            t("inv")
+        ),
+        format!(
+            "INSERT INTO {} (code, v) VALUES (2, 'b'), (1, 'a')",
+            t("inv")
+        ),
+        format!(
+            "CREATE TABLE {} (f FLOAT NOT NULL, j JSON, v TEXT, UNIQUE KEY (f))",
+            t("fl")
+        ),
+        format!("INSERT INTO {} VALUES (1.5, '{{}}', 'x')", t("fl")),
+        format!(
+            "CREATE TABLE {} (id BIGINT UNSIGNED PRIMARY KEY, v TEXT)",
+            t("big")
+        ),
+        format!(
+            "INSERT INTO {} VALUES (18015376320243457, 'a'), (18015376320243458, 'b'), \
+             (18015376320243459, 'c')",
+            t("big")
+        ),
+    ]
+}
+
+struct MyGlobal {
+    conn: Connection,
+    password: String,
+    name: &'static str,
+    old: String,
+}
+
+impl MyGlobal {
+    fn set(conn: &Connection, password: &str, name: &'static str, value: &str) -> Self {
+        use mysql::prelude::Queryable;
+        let mut backend = MyBackend::connect(conn, Some(password)).unwrap();
+        let old = backend
+            .strings(&format!("SELECT @@GLOBAL.{name}"), ())
+            .unwrap()[0][0]
+            .clone();
+        backend
+            .conn
+            .query_drop(format!("SET GLOBAL {name} = {value}"))
+            .unwrap();
+        Self {
+            conn: conn.clone(),
+            password: password.to_string(),
+            name,
+            old,
+        }
+    }
+}
+
+impl Drop for MyGlobal {
+    fn drop(&mut self) {
+        use mysql::prelude::Queryable;
+        if let Ok(mut backend) = MyBackend::connect(&self.conn, Some(&self.password)) {
+            let _ = backend
+                .conn
+                .query_drop(format!("SET GLOBAL {} = {}", self.name, self.old));
+        }
+    }
+}
+
+fn exercise_mysql_row_keys(session: &Session, conn: &Connection, password: &str, schema: &str) {
+    let t = |name: &str| qualified(DbKind::MySql, schema, name).unwrap();
+    let names = |list: &[&str]| -> Vec<String> { list.iter().map(|n| n.to_string()).collect() };
+    let rows = |sql: &str| script(session, sql, 10).unwrap().rows;
+
+    let gipk = |session: &Session| {
+        let gipk = page(session, schema, "gipk", 0, 100);
+        assert_eq!(
+            gipk.columns,
+            [ColumnInfo {
+                name: "v".to_string(),
+                type_name: "varchar(20)".to_string(),
+            }]
+        );
+        assert_eq!(gipk.key, RowKey::primary(names(&["my_row_id"])));
+        assert_eq!(gipk.hidden, ["my_row_id"]);
+        assert_eq!(gipk.ids, cells(&[&[Some("1")], &[Some("2")]]));
+        gipk
+    };
+    let listed = gipk(session);
+    update(session, edit_row(&listed, 1, "v", Some("edited"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT v FROM {} ORDER BY v", t("gipk"))),
+        cells(&[&[Some("a")], &[Some("edited")]])
+    );
+    {
+        let _hidden = MyGlobal::set(
+            conn,
+            password,
+            "show_gipk_in_create_table_and_information_schema",
+            "OFF",
+        );
+        let fresh = Session::spawn(conn.clone(), Some(password.to_string()));
+        assert!(matches!(wait(&fresh), Response::Connected { .. }));
+        let probed = gipk(&fresh);
+        update(&fresh, edit_row(&probed, 0, "v", Some("probed"))).unwrap();
+    }
+    assert_eq!(
+        rows(&format!("SELECT v FROM {} ORDER BY v", t("gipk"))),
+        cells(&[&[Some("edited")], &[Some("probed")]])
+    );
+
+    let inv = page(session, schema, "inv", 0, 100);
+    assert_eq!(
+        inv.key,
+        RowKey {
+            source: KeySource::Unique("code".to_string()),
+            columns: names(&["code"]),
+        }
+    );
+    assert_eq!(inv.hidden, ["code"]);
+    assert_eq!(inv.columns.len(), 1);
+    assert_eq!(inv.rows, cells(&[&[Some("a")], &[Some("b")]]));
+    assert_eq!(inv.ids, cells(&[&[Some("1")], &[Some("2")]]));
+    update(session, edit_row(&inv, 1, "v", Some("edited"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT code, v FROM {} ORDER BY code", t("inv"))),
+        cells(&[&[Some("1"), Some("a")], &[Some("2"), Some("edited")]])
+    );
+
+    let fl = page(session, schema, "fl", 0, 100);
+    assert_eq!(fl.key, RowKey::default(), "a float key isn't exact");
+    assert_eq!(fl.comparable, [false, false, true]);
+
+    rows(&format!(
+        "INSERT INTO {} VALUES (7, NULL), (8, 'x'), (8, 'x')",
+        t(EMPTY)
+    ));
+    let empty = page(session, schema, EMPTY, 0, 100);
+    assert_eq!(empty.key, RowKey::default());
+    assert!(empty.hidden.is_empty() && empty.ids.is_empty());
+    let edit = |key: &[(&str, Option<&str>)], a: &str| RowUpdate {
+        schema: schema.to_string(),
+        table: EMPTY.to_string(),
+        key: key
+            .iter()
+            .map(|(c, v)| (c.to_string(), v.map(str::to_string)))
+            .collect(),
+        values: vec![("a".to_string(), Some(a.to_string()))],
+    };
+    update(session, edit(&[("a", Some("7")), ("b", None)], "70")).unwrap();
+    let many = update(session, edit(&[("a", Some("8")), ("b", Some("x"))], "80")).unwrap_err();
+    assert!(many.contains(MANY_ROWS), "{many}");
+    assert_eq!(
+        rows(&format!("SELECT a, b FROM {} ORDER BY a", t(EMPTY))),
+        cells(&[
+            &[Some("8"), Some("x")],
+            &[Some("8"), Some("x")],
+            &[Some("70"), None],
+        ])
+    );
+
+    let big = page(session, schema, "big", 0, 100);
+    assert_eq!(big.key, RowKey::primary(names(&["id"])));
+    let at = big
+        .rows
+        .iter()
+        .position(|r| r[0].as_deref() == Some("18015376320243458"))
+        .unwrap();
+    update(session, edit_row(&big, at, "v", Some("edited"))).unwrap();
+    assert_eq!(
+        rows(&format!("SELECT id, v FROM {} ORDER BY id", t("big"))),
+        cells(&[
+            &[Some("18015376320243457"), Some("a")],
+            &[Some("18015376320243458"), Some("edited")],
+            &[Some("18015376320243459"), Some("c")],
+        ]),
+        "only the row with exactly this id changed, though the ids ending 457 and 458 are the same double"
+    );
+
+    let view = page(session, schema, VIEW, 0, 100);
+    assert_eq!(view.key, RowKey::default());
+    assert!(view.hidden.is_empty() && view.ids.is_empty());
+}
+
+#[test]
 #[ignore = "needs a throwaway MySQL server"]
 fn mysql_session_browses_database() {
     use mysql::prelude::Queryable;
@@ -2244,7 +3225,10 @@ fn mysql_session_browses_database() {
         .conn
         .query_drop(format!("CREATE DATABASE {quoted} CHARACTER SET utf8mb4"))
         .unwrap();
-    for statement in seed_statements(DbKind::MySql, schema) {
+    for statement in seed_statements(DbKind::MySql, schema)
+        .into_iter()
+        .chain(my_key_statements(schema))
+    {
         backend.conn.query_drop(statement).unwrap();
     }
     backend
@@ -2275,6 +3259,21 @@ fn mysql_session_browses_database() {
             .unwrap();
         assert_eq!(!status[0][1].is_empty(), expected, "{status:?}");
     }
+    let view = (schema.to_string(), VIEW.to_string());
+    let columns = backend.columns(schema, VIEW).unwrap();
+    assert_eq!(
+        backend.identity(schema, VIEW, &columns).unwrap().key,
+        RowKey::default()
+    );
+    assert_eq!(backend.gipk.get(&view), Some(&false), "probed once");
+    backend.gipk.insert(view.clone(), true);
+    assert_eq!(
+        backend.identity(schema, VIEW, &columns).unwrap().key,
+        RowKey::primary(vec![MYSQL_GIPK.to_string()]),
+        "not probed again for the next page"
+    );
+    backend.tables(schema).unwrap();
+    assert!(backend.gipk.is_empty(), "a refresh probes again");
     drop(backend);
 
     let session = Session::spawn(conn.clone(), Some(password.clone()));
@@ -2385,6 +3384,7 @@ fn mysql_session_browses_database() {
 
     conn.database = schema.to_string();
     exercise_updates(&session, DbKind::MySql, schema);
+    exercise_mysql_row_keys(&session, &conn, &password, schema);
 
     let scoped = Session::spawn(conn.clone(), Some(password));
     assert!(matches!(wait(&scoped), Response::Connected { .. }));
@@ -2537,7 +3537,7 @@ fn postgres_read_only_session_cannot_write() {
         RowUpdate {
             schema: "cooper_ro".into(),
             table: "t".into(),
-            key: vec![("id".into(), "1".into())],
+            key: vec![("id".into(), Some("1".into()))],
             values: vec![("v".into(), Some("edited".into()))],
         },
     )
@@ -2610,7 +3610,7 @@ fn mysql_read_only_session_cannot_write() {
         RowUpdate {
             schema: "cooper_ro".into(),
             table: "t".into(),
-            key: vec![("id".into(), "1".into())],
+            key: vec![("id".into(), Some("1".into()))],
             values: vec![("v".into(), Some("edited".into()))],
         },
     )

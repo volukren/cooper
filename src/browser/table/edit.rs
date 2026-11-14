@@ -1,6 +1,6 @@
 use rune::TextEdit;
 
-use crate::db::{self, Page, RowUpdate, TableKind};
+use crate::db::{self, KeySource, Page, RowUpdate, TableKind};
 
 use super::format::record_footer;
 
@@ -8,6 +8,10 @@ pub const MAX_FIELD_ROWS: usize = 8;
 
 pub const BYTES_NOTE: &str = "Binary value: not editable here";
 pub const CUT_NOTE: &str = "Longer than the loaded 64 KB: not editable here";
+pub const MORE_KEYS: &str =
+    "Cancel the edit, then choose more key columns to tell these rows apart.";
+pub const NO_FINGERPRINT: &str = "No value in this row can be compared exactly, so it can't be \
+                                  found safely by its row id; add a primary key or a unique index";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exact {
@@ -47,36 +51,63 @@ pub struct Target {
     pub schema: String,
     pub table: String,
     pub row_label: String,
-    pub key: Vec<(String, String)>,
+    pub key: Vec<(String, Option<String>)>,
+    pub chosen: bool,
     pub fields: Vec<FieldSpec>,
 }
 
-pub fn target(page: &Page, row: usize, kind: TableKind) -> Result<Target, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    Reason(String),
+    ChooseKey { stale: bool },
+}
+
+fn refuse(reason: impl Into<String>) -> Refusal {
+    Refusal::Reason(reason.into())
+}
+
+pub fn target(
+    page: &Page,
+    row: usize,
+    kind: TableKind,
+    chosen: Option<&[String]>,
+) -> Result<Target, Refusal> {
     if row >= page.rows.len() {
-        return Err("No row to edit".to_string());
+        return Err(refuse("No row to edit"));
     }
-    if page.primary_key.is_empty() {
-        return Err(match kind {
-            TableKind::Table => format!(
-                "{} has no primary key, so its rows can't be edited",
-                db::render_text(&page.table)
-            ),
-            TableKind::View | TableKind::MaterializedView => {
-                "Rows of a view can't be edited".to_string()
+    if kind != TableKind::Table {
+        return Err(refuse("Rows of a view can't be edited"));
+    }
+    let (columns, chosen) = match chosen {
+        _ if page.key.source != KeySource::None => (page.key.columns.as_slice(), false),
+        Some(columns) if usable_key(page, columns) => (columns, true),
+        Some(_) => return Err(Refusal::ChooseKey { stale: true }),
+        None => return Err(Refusal::ChooseKey { stale: false }),
+    };
+    let mut key = Vec::with_capacity(columns.len());
+    for name in columns {
+        match key_value(page, row, name) {
+            Some(value) => key.push((name.clone(), value)),
+            None if chosen => {
+                return Err(refuse(format!(
+                    "The key column {} has no exact value in this row, so it can't be edited; \
+                     choose other key columns",
+                    db::render_text(name)
+                )));
             }
-        });
-    }
-    let mut key = Vec::with_capacity(page.primary_key.len());
-    for name in &page.primary_key {
-        let column = page.columns.iter().position(|column| column.name == *name);
-        match column.map(|column| exact(page, row, column)) {
-            Some(Exact::Value(Some(value))) => key.push((name.clone(), value)),
-            _ => {
-                return Err(format!(
+            None => {
+                return Err(refuse(format!(
                     "The key column {} has no exact value here, so the row can't be edited",
                     db::render_text(name)
-                ));
+                )));
             }
+        }
+    }
+    if page.key.source == KeySource::RowId {
+        let id = key.len();
+        fingerprint(page, row, &mut key);
+        if key.len() == id {
+            return Err(refuse(NO_FINGERPRINT));
         }
     }
     let fields = page
@@ -92,7 +123,7 @@ pub fn target(page: &Page, row: usize, kind: TableKind) -> Result<Target, String
             FieldSpec {
                 name: info.name.clone(),
                 type_name: info.type_name.clone(),
-                key: page.primary_key.contains(&info.name),
+                key: columns.contains(&info.name),
                 original,
                 locked,
             }
@@ -103,11 +134,82 @@ pub fn target(page: &Page, row: usize, kind: TableKind) -> Result<Target, String
         table: page.table.clone(),
         row_label: record_footer(page.offset, row),
         key,
+        chosen,
         fields,
     })
 }
 
+pub fn usable_key(page: &Page, columns: &[String]) -> bool {
+    !columns.is_empty()
+        && columns.iter().all(|name| {
+            page.columns
+                .iter()
+                .position(|column| column.name == *name)
+                .is_some_and(|at| page.comparable.get(at).copied().unwrap_or(false))
+        })
+}
+
+fn key_value(page: &Page, row: usize, name: &str) -> Option<Option<String>> {
+    if let Some(at) = page.hidden.iter().position(|hidden| hidden == name) {
+        return page.ids.get(row)?.get(at)?.clone().map(Some);
+    }
+    let column = page.columns.iter().position(|column| column.name == name)?;
+    match exact(page, row, column) {
+        Exact::Value(value) => Some(value),
+        Exact::Opaque | Exact::Cut => None,
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Follow {
+    pub all: Vec<(usize, Option<String>)>,
+    pub core: Vec<(usize, Option<String>)>,
+}
+
+pub fn row_matches(page: &Page, row: usize, follow: &[(usize, Option<String>)]) -> bool {
+    row < page.rows.len()
+        && follow.iter().all(|(column, value)| {
+            *column < page.columns.len()
+                && matches!(exact(page, row, *column), Exact::Value(shown) if shown == *value)
+        })
+}
+
+pub fn find_row(page: &Page, follow: &Follow) -> Option<usize> {
+    for values in [&follow.all, &follow.core] {
+        if values.is_empty() {
+            continue;
+        }
+        let mut matching = (0..page.rows.len()).filter(|row| row_matches(page, *row, values));
+        match (matching.next(), matching.next()) {
+            (Some(row), None) => return Some(row),
+            (None, _) => {}
+            (Some(_), Some(_)) => return None,
+        }
+    }
+    None
+}
+
+fn fingerprint(page: &Page, row: usize, key: &mut Vec<(String, Option<String>)>) {
+    for (column, info) in page.columns.iter().enumerate() {
+        let comparable = page.comparable.get(column).copied().unwrap_or(false);
+        if !comparable || key.iter().any(|(name, _)| *name == info.name) {
+            continue;
+        }
+        if let Exact::Value(value) = exact(page, row, column) {
+            key.push((info.name.clone(), value));
+        }
+    }
+}
+
 impl Target {
+    pub fn save_error(&self, message: &str) -> String {
+        if self.chosen && message.starts_with(db::MANY_ROWS) {
+            format!("Not saved: {message}. {MORE_KEYS}")
+        } else {
+            format!("Not saved: {message}")
+        }
+    }
+
     pub fn changed(&self, index: usize, value: &Option<String>) -> bool {
         self.fields
             .get(index)
@@ -298,6 +400,26 @@ impl Draft {
         self.target.update(&self.values())
     }
 
+    pub fn follow(&self) -> Follow {
+        let mut follow = Follow::default();
+        for (index, field) in self.target.fields.iter().enumerate() {
+            if field.locked.is_some() {
+                continue;
+            }
+            let changed = self.changed(index);
+            let value = if changed {
+                self.value(index).flatten()
+            } else {
+                field.original.clone()
+            };
+            if changed || field.key {
+                follow.core.push((index, value.clone()));
+            }
+            follow.all.push((index, value));
+        }
+        follow
+    }
+
     pub fn focused(&self) -> Option<usize> {
         self.fields
             .iter()
@@ -339,8 +461,24 @@ impl Draft {
 
 #[cfg(test)]
 mod tests {
-    use super::{BYTES_NOTE, CUT_NOTE, Exact, exact, target};
-    use crate::db::{ColumnInfo, FullValue, FullValues, Page, RowUpdate, TableKind};
+    use super::{
+        BYTES_NOTE, CUT_NOTE, Draft, Exact, Follow, MORE_KEYS, NO_FINGERPRINT, Refusal, exact,
+        find_row, row_matches, target,
+    };
+    use crate::db::{
+        ColumnInfo, FullValue, FullValues, KeySource, Page, RowKey, RowUpdate, TableKind,
+    };
+
+    fn key(source: KeySource, columns: &[&str]) -> RowKey {
+        RowKey {
+            source,
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    fn reason(text: &str) -> Refusal {
+        Refusal::Reason(text.to_string())
+    }
 
     fn page() -> Page {
         let column = |name: &str| ColumnInfo {
@@ -382,9 +520,10 @@ mod tests {
             ],
             full,
             opaque: [(0, 2)].into_iter().collect(),
-            primary_key: vec!["id".to_string()],
+            key: key(KeySource::Primary, &["id"]),
+            comparable: vec![true; 4],
             offset: 100,
-            has_more: false,
+            ..Page::default()
         }
     }
 
@@ -404,14 +543,14 @@ mod tests {
     #[test]
     fn a_target_knows_its_key_and_locks_what_it_cannot_spell() {
         let page = page();
-        let first = target(&page, 0, TableKind::Table).unwrap();
+        let first = target(&page, 0, TableKind::Table, None).unwrap();
         assert_eq!(first.row_label, "row 101");
-        assert_eq!(first.key, [("id".to_string(), "7".to_string())]);
+        assert_eq!(first.key, [("id".to_string(), Some("7".to_string()))]);
         assert!(first.fields[0].key && !first.fields[1].key);
         assert_eq!(first.fields[1].original.as_deref(), Some("line\none"));
         assert_eq!(first.fields[2].locked, Some(BYTES_NOTE));
         assert_eq!(first.fields[3].original, None);
-        let second = target(&page, 1, TableKind::Table).unwrap();
+        let second = target(&page, 1, TableKind::Table, None).unwrap();
         assert_eq!(second.fields[1].locked, Some(CUT_NOTE));
         assert_eq!(second.fields[1].original.as_deref(), Some("xxx…"));
     }
@@ -420,32 +559,381 @@ mod tests {
     fn rows_without_an_exact_key_cannot_be_edited() {
         let mut page = page();
         assert_eq!(
-            target(&page, 2, TableKind::Table).unwrap_err(),
-            "No row to edit"
+            target(&page, 2, TableKind::Table, None).unwrap_err(),
+            reason("No row to edit")
         );
-        page.primary_key = vec!["data".to_string()];
+        page.key = key(KeySource::Primary, &["data"]);
+        assert_eq!(
+            target(&page, 0, TableKind::Table, None).unwrap_err(),
+            reason("The key column data has no exact value here, so the row can't be edited")
+        );
+        page.key = key(KeySource::Primary, &["note"]);
         assert!(
-            target(&page, 0, TableKind::Table)
-                .unwrap_err()
-                .contains("data")
+            target(&page, 1, TableKind::Table, None).is_err(),
+            "a cut key"
         );
-        page.primary_key = vec!["tag".to_string()];
-        assert!(target(&page, 0, TableKind::Table).is_err(), "a NULL key");
-        page.primary_key.clear();
+        page.key = RowKey::default();
         assert_eq!(
-            target(&page, 0, TableKind::Table).unwrap_err(),
-            "t has no primary key, so its rows can't be edited"
+            target(&page, 0, TableKind::Table, None).unwrap_err(),
+            Refusal::ChooseKey { stale: false }
         );
         assert_eq!(
-            target(&page, 0, TableKind::View).unwrap_err(),
-            "Rows of a view can't be edited"
+            target(&page, 0, TableKind::View, None).unwrap_err(),
+            reason("Rows of a view can't be edited")
         );
+    }
+
+    #[test]
+    fn a_view_is_refused_before_its_key_is_looked_at() {
+        let page = page();
+        assert_eq!(
+            target(&page, 0, TableKind::MaterializedView, None).unwrap_err(),
+            reason("Rows of a view can't be edited")
+        );
+    }
+
+    #[test]
+    fn a_null_key_value_finds_the_row_by_is_null() {
+        let mut page = page();
+        page.key = key(KeySource::Primary, &["id", "tag"]);
+        let first = target(&page, 0, TableKind::Table, None).unwrap();
+        assert_eq!(
+            first.key,
+            [
+                ("id".to_string(), Some("7".to_string())),
+                ("tag".to_string(), None)
+            ]
+        );
+        assert!(first.fields[3].key);
+    }
+
+    #[test]
+    fn a_hidden_key_comes_from_the_ids() {
+        let mut page = page();
+        page.key = key(KeySource::Unique("t_code".to_string()), &["code"]);
+        page.hidden = vec!["code".to_string()];
+        page.ids = vec![vec![Some("c7".to_string())], vec![None]];
+        let first = target(&page, 0, TableKind::Table, None).unwrap();
+        assert_eq!(first.key, [("code".to_string(), Some("c7".to_string()))]);
+        assert_eq!(first.fields.len(), 4, "hidden columns are not fields");
+        assert!(first.fields.iter().all(|field| !field.key));
+        assert_eq!(
+            target(&page, 1, TableKind::Table, None).unwrap_err(),
+            reason("The key column code has no exact value here, so the row can't be edited")
+        );
+    }
+
+    #[test]
+    fn a_row_id_is_checked_against_the_exact_comparable_values() {
+        let pairs = |pairs: &[(&str, Option<&str>)]| -> Vec<(String, Option<String>)> {
+            pairs
+                .iter()
+                .map(|(c, v)| (c.to_string(), v.map(str::to_string)))
+                .collect()
+        };
+        let mut page = page();
+        page.key = key(KeySource::RowId, &["rowid"]);
+        page.hidden = vec!["rowid".to_string()];
+        page.ids = vec![vec![Some("1".to_string())], vec![Some("2".to_string())]];
+        page.comparable = vec![true, true, true, false];
+        let first = target(&page, 0, TableKind::Table, None).unwrap();
+        assert_eq!(
+            first.key,
+            pairs(&[
+                ("rowid", Some("1")),
+                ("id", Some("7")),
+                ("note", Some("line\none"))
+            ]),
+            "not the opaque data nor the tag that can't be compared"
+        );
+        assert!(
+            first.fields.iter().all(|field| !field.key),
+            "only the row id is the key"
+        );
+
+        page.comparable = vec![true; 4];
+        let second = target(&page, 1, TableKind::Table, None).unwrap();
+        assert_eq!(
+            second.key,
+            pairs(&[
+                ("rowid", Some("2")),
+                ("id", Some("8")),
+                ("data", None),
+                ("tag", Some("a"))
+            ]),
+            "not the cut note; NULL is matched by IS NULL"
+        );
+
+        page.key = key(KeySource::Unique("t_rowid".to_string()), &["rowid"]);
+        assert_eq!(
+            target(&page, 1, TableKind::Table, None).unwrap().key,
+            pairs(&[("rowid", Some("2"))]),
+            "other sources are not fingerprinted"
+        );
+    }
+
+    #[test]
+    fn a_row_id_alone_is_not_trusted() {
+        let mut page = page();
+        page.key = key(KeySource::RowId, &["rowid"]);
+        page.hidden = vec!["rowid".to_string()];
+        page.ids = vec![vec![Some("1".to_string())], vec![Some("2".to_string())]];
+        page.comparable = vec![false; 4];
+        assert_eq!(
+            target(&page, 0, TableKind::Table, None).unwrap_err(),
+            reason(NO_FINGERPRINT),
+            "a reused or renumbered row id would find another row"
+        );
+        page.comparable = vec![false, true, false, false];
+        assert_eq!(
+            target(&page, 1, TableKind::Table, None).unwrap_err(),
+            reason(NO_FINGERPRINT),
+            "the only comparable value is cut"
+        );
+        assert!(target(&page, 0, TableKind::Table, None).is_ok());
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_table_without_a_key_asks_for_the_chosen_columns() {
+        let mut page = page();
+        page.key = RowKey::default();
+        page.comparable = vec![true, true, false, true];
+        let chosen = names(&["id", "tag"]);
+        let first = target(&page, 0, TableKind::Table, Some(&chosen)).unwrap();
+        assert!(first.chosen);
+        assert_eq!(
+            first.key,
+            [
+                ("id".to_string(), Some("7".to_string())),
+                ("tag".to_string(), None)
+            ],
+            "a NULL in a chosen column is matched by IS NULL"
+        );
+        assert!(first.fields[0].key && first.fields[3].key && !first.fields[1].key);
+
+        for stale in [names(&["gone"]), names(&["id", "data"]), Vec::new()] {
+            assert_eq!(
+                target(&page, 0, TableKind::Table, Some(&stale)).unwrap_err(),
+                Refusal::ChooseKey { stale: true },
+                "{stale:?}: a missing or incomparable column"
+            );
+        }
+        assert_eq!(
+            target(&page, 0, TableKind::View, Some(&chosen)).unwrap_err(),
+            reason("Rows of a view can't be edited"),
+            "the view check comes first"
+        );
+
+        page.key = key(KeySource::Primary, &["id"]);
+        let own = target(&page, 0, TableKind::Table, Some(&names(&["tag"]))).unwrap();
+        assert!(!own.chosen, "a key of its own wins over a chosen one");
+        assert_eq!(own.key, [("id".to_string(), Some("7".to_string()))]);
+    }
+
+    #[test]
+    fn a_chosen_key_without_an_exact_value_asks_for_other_columns() {
+        let mut page = page();
+        page.key = RowKey::default();
+        let opaque = names(&["id", "data"]);
+        assert_eq!(
+            target(&page, 0, TableKind::Table, Some(&opaque)).unwrap_err(),
+            reason(
+                "The key column data has no exact value in this row, so it can't be edited; \
+                 choose other key columns"
+            )
+        );
+        assert!(
+            target(&page, 1, TableKind::Table, Some(&opaque)).is_ok(),
+            "the other row has a NULL there"
+        );
+        let cut = names(&["note"]);
+        assert_eq!(
+            target(&page, 1, TableKind::Table, Some(&cut)).unwrap_err(),
+            reason(
+                "The key column note has no exact value in this row, so it can't be edited; \
+                 choose other key columns"
+            )
+        );
+        let chosen = target(&page, 0, TableKind::Table, Some(&cut)).unwrap();
+        assert_eq!(
+            chosen.key,
+            [("note".to_string(), Some("line\none".to_string()))],
+            "no row id, so no fingerprint"
+        );
+    }
+
+    #[test]
+    fn many_matches_of_a_chosen_key_ask_for_more_key_columns() {
+        let many = format!("{} 2 rows (nothing was saved)", crate::db::MANY_ROWS);
+        let mut target = target(&page(), 0, TableKind::Table, None).unwrap();
+        assert!(!target.chosen);
+        assert_eq!(target.save_error(&many), format!("Not saved: {many}"));
+        target.chosen = true;
+        assert_eq!(
+            target.save_error(&many),
+            "Not saved: the row's key matches 2 rows (nothing was saved). Cancel the edit, then \
+             choose more key columns to tell these rows apart."
+        );
+        assert!(target.save_error(&many).ends_with(MORE_KEYS));
+        assert_eq!(
+            target.save_error("the row was not found"),
+            "Not saved: the row was not found"
+        );
+    }
+
+    fn follow(all: &[(usize, Option<&str>)], core: &[(usize, Option<&str>)]) -> Follow {
+        let values = |values: &[(usize, Option<&str>)]| {
+            values
+                .iter()
+                .map(|(column, value)| (*column, value.map(str::to_string)))
+                .collect()
+        };
+        Follow {
+            all: values(all),
+            core: values(core),
+        }
+    }
+
+    #[test]
+    fn a_saved_row_is_followed_by_the_exact_values_it_has_now() {
+        let mut page = page();
+        page.key = RowKey::default();
+        let chosen = names(&["id"]);
+        let mut draft = Draft::new(
+            target(&page, 0, TableKind::Table, Some(&chosen)).unwrap(),
+            0,
+        );
+        assert!(draft.open(3));
+        draft.input_mut(3).unwrap().replace_text("t".to_string());
+        draft.on_change(3);
+        let follow = draft.follow();
+        assert_eq!(
+            follow,
+            self::follow(
+                &[(0, Some("7")), (1, Some("line\none")), (3, Some("t"))],
+                &[(0, Some("7")), (3, Some("t"))]
+            ),
+            "not the opaque data; the changed tag as saved; the key and the saved tag tell it apart"
+        );
+
+        let mut saved = page.clone();
+        saved.rows[0][3] = Some("t".to_string());
+        assert_eq!(find_row(&saved, &follow), Some(0));
+        assert_eq!(
+            find_row(&page, &follow),
+            None,
+            "the saved value is not there"
+        );
+
+        let mut moved = saved.clone();
+        moved.rows.swap(0, 1);
+        moved.full = moved
+            .full
+            .into_iter()
+            .map(|((row, column), value)| ((1 - row, column), value))
+            .collect();
+        moved.opaque = [(1, 2)].into_iter().collect();
+        assert!(
+            !row_matches(&moved, 0, &follow.all),
+            "another row took its place"
+        );
+        assert_eq!(find_row(&moved, &follow), Some(1), "it moved down");
+
+        moved.rows[1][0] = Some("9".to_string());
+        assert_eq!(find_row(&moved, &follow), None, "it is gone");
+    }
+
+    #[test]
+    fn a_saved_row_is_told_apart_from_its_twin() {
+        let mut page = page();
+        page.key = RowKey::default();
+        page.rows[1] = page.rows[0].clone();
+        page.opaque.insert((1, 2));
+        page.full.remove(&(1, 1));
+        page.full.insert((1, 1), page.full[&(0, 1)].clone());
+        let chosen = names(&["id"]);
+        let mut draft = Draft::new(
+            target(&page, 0, TableKind::Table, Some(&chosen)).unwrap(),
+            0,
+        );
+        assert!(draft.open(3));
+        draft.input_mut(3).unwrap().replace_text("t".to_string());
+        draft.on_change(3);
+        let follow = draft.follow();
+
+        let mut refreshed = page.clone();
+        refreshed.rows[1][3] = Some("t".to_string());
+        assert!(
+            !row_matches(&refreshed, 0, &follow.all),
+            "the twin that kept the old value"
+        );
+        assert_eq!(find_row(&refreshed, &follow), Some(1));
+
+        refreshed.rows[0][3] = Some("t".to_string());
+        assert_eq!(
+            find_row(&refreshed, &follow),
+            None,
+            "two rows look like the saved one"
+        );
+    }
+
+    #[test]
+    fn a_saved_row_is_found_by_its_core_values_when_another_value_changed() {
+        let page = page();
+        let follow = follow(
+            &[(0, Some("7")), (1, Some("line\none")), (3, Some("t"))],
+            &[(3, Some("t"))],
+        );
+        let mut touched = page.clone();
+        touched.rows[0][3] = Some("t".to_string());
+        touched.full.remove(&(0, 1));
+        touched.rows[0][1] = Some("rewritten".to_string());
+        assert_eq!(
+            find_row(&touched, &follow),
+            Some(0),
+            "a trigger rewrote the note"
+        );
+        touched.rows[1][3] = Some("t".to_string());
+        assert_eq!(
+            find_row(&touched, &follow),
+            None,
+            "the core values are not unique"
+        );
+        assert_eq!(
+            find_row(&touched, &Follow::default()),
+            None,
+            "nothing to tell rows apart by"
+        );
+    }
+
+    #[test]
+    fn only_exact_values_in_range_match_a_followed_row() {
+        let page = page();
+        assert!(
+            !row_matches(&page, 1, &[(1, Some("xxx…".to_string()))]),
+            "a cut value never matches, even as shown"
+        );
+        assert!(
+            !row_matches(&page, 0, &[(2, Some("0xdead".to_string()))]),
+            "nor does an opaque one"
+        );
+        assert!(row_matches(&page, 0, &[(3, None)]), "NULL matches NULL");
+        assert!(
+            !row_matches(&page, 0, &[(9, None)]),
+            "a column that is gone"
+        );
+        assert!(!row_matches(&page, 2, &[]), "a row that is gone");
+        assert_eq!(find_row(&page, &follow(&[(0, Some("8"))], &[])), Some(1));
     }
 
     #[test]
     fn the_update_carries_only_the_changed_columns() {
         let page = page();
-        let target = target(&page, 0, TableKind::Table).unwrap();
+        let target = target(&page, 0, TableKind::Table, None).unwrap();
         let unchanged: Vec<Option<String>> = target
             .fields
             .iter()
@@ -462,7 +950,7 @@ mod tests {
             Some(RowUpdate {
                 schema: "main".to_string(),
                 table: "t".to_string(),
-                key: vec![("id".to_string(), "7".to_string())],
+                key: vec![("id".to_string(), Some("7".to_string()))],
                 values: vec![
                     ("note".to_string(), None),
                     ("tag".to_string(), Some(String::new()))

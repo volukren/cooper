@@ -466,6 +466,12 @@ impl Workspace {
         let draft =
             browser::smoke_sql().or_else(|| self.home.drafts.get(&connection.name).cloned());
         let mut browser = Browser::new(id, connection.clone(), session, draft);
+        browser.row_keys = self
+            .home
+            .row_keys
+            .get(&connection.name)
+            .cloned()
+            .unwrap_or_default();
         browser.set_server_info(server_info);
         if let Some(waker) = self.waker.clone() {
             browser.set_waker(waker);

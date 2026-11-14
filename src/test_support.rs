@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 use crate::{
     browser::{Browser, console::Console, table::TableView, tree::SchemaTree},
-    connection::{Connection, DbKind, PasswordStorage, Store, Tag},
+    connection::{Connection, DbKind, PasswordStorage, SslMode, Store, Tag},
     keys::Command,
     workspace::{self, TabId, Workspace},
 };
@@ -115,6 +115,10 @@ pub fn sqlite_connection(name: &str, path: &Path) -> Connection {
         database: path.to_string_lossy().into_owned(),
         password_storage: PasswordStorage::Plain,
         password: String::new(),
+        ssl_mode: SslMode::default(),
+        ssl_key: String::new(),
+        ssl_cert: String::new(),
+        ssl_ca: String::new(),
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::connection::DbKind;
+use crate::connection::{DbKind, SslMode};
 
 pub fn placeholder(kind: DbKind) -> &'static str {
     match kind {
@@ -16,6 +16,10 @@ pub struct ParsedUrl {
     pub user: String,
     pub password: String,
     pub database: String,
+    pub ssl_mode: SslMode,
+    pub ssl_key: String,
+    pub ssl_cert: String,
+    pub ssl_ca: String,
 }
 
 impl ParsedUrl {
@@ -27,6 +31,10 @@ impl ParsedUrl {
             user: String::new(),
             password: String::new(),
             database: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         }
     }
 }
@@ -95,6 +103,9 @@ fn parse_server(kind: DbKind, rest: &str) -> Result<ParsedUrl, String> {
     parsed.port = parse_port(port)?;
     parsed.database = decode(path.trim_end_matches('/'))?;
 
+    let mut explicit_mode = None;
+    let mut use_ssl_false = false;
+    let mut system_root = false;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let value = decode(value)?;
@@ -104,6 +115,41 @@ fn parse_server(kind: DbKind, rest: &str) -> Result<ParsedUrl, String> {
             "user" => parsed.user = value,
             "password" => parsed.password = value,
             "dbname" | "database" => parsed.database = value,
+            _ => match ssl_param(key).as_str() {
+                "sslmode" => {
+                    parsed.ssl_mode = ssl_mode(kind, key, &value)?;
+                    explicit_mode = Some(value);
+                }
+                "usessl" => use_ssl_false = value.eq_ignore_ascii_case("false"),
+                "sslkey" => parsed.ssl_key = value,
+                "sslcert" => parsed.ssl_cert = value,
+                "sslrootcert" if value == "system" => {
+                    system_root = true;
+                    parsed.ssl_ca.clear();
+                }
+                "sslrootcert" | "sslca" => {
+                    system_root = false;
+                    parsed.ssl_ca = value;
+                }
+                _ => {}
+            },
+        }
+    }
+    if use_ssl_false && explicit_mode.is_none() {
+        parsed.ssl_mode = SslMode::Disable;
+    }
+    if kind == DbKind::Postgres {
+        match (&explicit_mode, parsed.ssl_mode) {
+            (None, _) if system_root => parsed.ssl_mode = SslMode::VerifyFull,
+            (Some(mode), ssl_mode) if system_root && ssl_mode != SslMode::VerifyFull => {
+                return Err(format!(
+                    "weak sslmode \"{mode}\" cannot be used with sslrootcert=system, \
+                     expected verify-full"
+                ));
+            }
+            (_, SslMode::Require) if !parsed.ssl_ca.is_empty() => {
+                parsed.ssl_mode = SslMode::VerifyCa;
+            }
             _ => {}
         }
     }
@@ -111,6 +157,32 @@ fn parse_server(kind: DbKind, rest: &str) -> Result<ParsedUrl, String> {
         parsed.host = "localhost".into();
     }
     Ok(parsed)
+}
+
+fn ssl_param(key: &str) -> String {
+    key.chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn ssl_mode(kind: DbKind, key: &str, value: &str) -> Result<SslMode, String> {
+    match value.to_ascii_lowercase().replace('_', "-").as_str() {
+        "disable" | "disabled" => Ok(SslMode::Disable),
+        "allow" | "prefer" | "preferred" => Ok(SslMode::Prefer),
+        "require" | "required" | "trust" => Ok(SslMode::Require),
+        "verify-ca" => Ok(SslMode::VerifyCa),
+        "verify-full" | "verify-identity" => Ok(SslMode::VerifyFull),
+        _ => {
+            let expected = match kind {
+                DbKind::MySql => "DISABLED, PREFERRED, REQUIRED, VERIFY_CA or VERIFY_IDENTITY",
+                _ => "disable, allow, prefer, require, verify-ca or verify-full",
+            };
+            Err(format!(
+                "unsupported {key} \"{value}\", expected {expected}"
+            ))
+        }
+    }
 }
 
 fn split_host_port(hostport: &str) -> Result<(&str, &str), String> {
@@ -178,12 +250,12 @@ mod tests {
         database: &str,
     ) -> ParsedUrl {
         ParsedUrl {
-            kind,
             host: host.into(),
             port,
             user: user.into(),
             password: password.into(),
             database: database.into(),
+            ..ParsedUrl::new(kind)
         }
     }
 
@@ -202,7 +274,10 @@ mod tests {
         );
         assert_eq!(
             parse("  postgresql://admin@db/app?sslmode=require  ").unwrap(),
-            server(DbKind::Postgres, "db", None, "admin", "", "app")
+            ParsedUrl {
+                ssl_mode: SslMode::Require,
+                ..server(DbKind::Postgres, "db", None, "admin", "", "app")
+            }
         );
     }
 
@@ -313,5 +388,159 @@ mod tests {
     #[test]
     fn a_stray_percent_sign_is_kept() {
         assert_eq!(parse("postgres://u:100%@db/app").unwrap().password, "100%");
+    }
+
+    #[test]
+    fn libpq_ssl_parameters() {
+        let parsed = parse(
+            "postgres://db/app?sslmode=verify-full&sslrootcert=~/certs/ca.pem\
+             &sslcert=%2Fcerts%2Fclient.crt&sslkey=/certs/client.key",
+        )
+        .unwrap();
+        assert_eq!(parsed.ssl_mode, SslMode::VerifyFull);
+        assert_eq!(parsed.ssl_ca, "~/certs/ca.pem");
+        assert_eq!(parsed.ssl_cert, "/certs/client.crt");
+        assert_eq!(parsed.ssl_key, "/certs/client.key");
+        assert_eq!(parsed.database, "app");
+
+        for (mode, expected) in [
+            ("disable", SslMode::Disable),
+            ("allow", SslMode::Prefer),
+            ("prefer", SslMode::Prefer),
+            ("require", SslMode::Require),
+            ("verify-ca", SslMode::VerifyCa),
+            ("verify-full", SslMode::VerifyFull),
+        ] {
+            let url = format!("postgres://db/app?sslmode={mode}");
+            assert_eq!(parse(&url).unwrap().ssl_mode, expected, "{url}");
+        }
+        assert_eq!(
+            parse("postgres://db/app").unwrap().ssl_mode,
+            SslMode::Prefer
+        );
+        let system = parse("postgres://db/app?sslrootcert=system").unwrap();
+        assert_eq!(system.ssl_ca, "");
+        assert_eq!(system.ssl_mode, SslMode::VerifyFull);
+        for url in [
+            "postgres://db/app?sslrootcert=system&sslmode=verify-full",
+            "postgres://db/app?sslmode=verify-full&sslrootcert=system",
+        ] {
+            assert_eq!(parse(url).unwrap().ssl_mode, SslMode::VerifyFull, "{url}");
+        }
+        for mode in ["disable", "allow", "prefer", "require", "verify-ca"] {
+            let url = format!("postgres://db/app?sslrootcert=system&sslmode={mode}");
+            assert_eq!(
+                parse(&url).unwrap_err(),
+                format!(
+                    "weak sslmode \"{mode}\" cannot be used with sslrootcert=system, \
+                     expected verify-full"
+                )
+            );
+        }
+        let overridden = parse("postgres://db/app?sslrootcert=system&sslrootcert=/c/ca.pem");
+        assert_eq!(overridden.unwrap().ssl_mode, SslMode::Prefer);
+
+        for (url, expected) in [
+            (
+                "postgres://db/app?sslmode=require&sslrootcert=/certs/ca.pem",
+                SslMode::VerifyCa,
+            ),
+            (
+                "postgres://db/app?sslrootcert=/certs/ca.pem&sslmode=require",
+                SslMode::VerifyCa,
+            ),
+            (
+                "postgres://db/app?sslrootcert=/certs/ca.pem",
+                SslMode::Prefer,
+            ),
+            (
+                "postgres://db/app?sslmode=verify-full&sslrootcert=/certs/ca.pem",
+                SslMode::VerifyFull,
+            ),
+        ] {
+            assert_eq!(parse(url).unwrap().ssl_mode, expected, "{url}");
+        }
+        assert_eq!(
+            parse("mysql://db/shop?ssl-mode=REQUIRED&ssl-ca=/c/ca.pem")
+                .unwrap()
+                .ssl_mode,
+            SslMode::Require
+        );
+    }
+
+    #[test]
+    fn mysql_ssl_parameters() {
+        for (url, expected) in [
+            ("mysql://db/shop?ssl-mode=DISABLED", SslMode::Disable),
+            ("mysql://db/shop?sslMode=preferred", SslMode::Prefer),
+            ("mysql://db/shop?ssl_mode=REQUIRED", SslMode::Require),
+            ("mysql://db/shop?ssl-mode=VERIFY_CA", SslMode::VerifyCa),
+            (
+                "mysql://db/shop?sslMode=VERIFY_IDENTITY",
+                SslMode::VerifyFull,
+            ),
+            ("jdbc:mysql://db/shop?useSSL=false", SslMode::Disable),
+            ("jdbc:mysql://db/shop?useSSL=true", SslMode::Prefer),
+            (
+                "jdbc:mysql://db/shop?sslMode=REQUIRED&useSSL=false",
+                SslMode::Require,
+            ),
+            (
+                "jdbc:mysql://db/shop?useSSL=false&sslMode=VERIFY_IDENTITY",
+                SslMode::VerifyFull,
+            ),
+            (
+                "jdbc:mysql://db/shop?useSSL=false&useSSL=true",
+                SslMode::Prefer,
+            ),
+            ("jdbc:mariadb://db/shop?sslMode=trust", SslMode::Require),
+            (
+                "jdbc:mariadb://db/shop?sslMode=verify-ca",
+                SslMode::VerifyCa,
+            ),
+            (
+                "jdbc:mariadb://db/shop?sslMode=verify-full",
+                SslMode::VerifyFull,
+            ),
+            ("jdbc:mariadb://db/shop?sslMode=disable", SslMode::Disable),
+        ] {
+            assert_eq!(parse(url).unwrap().ssl_mode, expected, "{url}");
+        }
+        let parsed =
+            parse("mysql://db/shop?ssl-ca=/c/ca.pem&ssl-cert=/c/client.pem&ssl-key=/c/client.key")
+                .unwrap();
+        assert_eq!(
+            (
+                parsed.ssl_ca.as_str(),
+                parsed.ssl_cert.as_str(),
+                parsed.ssl_key.as_str()
+            ),
+            ("/c/ca.pem", "/c/client.pem", "/c/client.key")
+        );
+        let parsed = parse("mysql://db/shop?sslca=a&sslcert=b&sslkey=c").unwrap();
+        assert_eq!(
+            (
+                parsed.ssl_ca.as_str(),
+                parsed.ssl_cert.as_str(),
+                parsed.ssl_key.as_str()
+            ),
+            ("a", "b", "c")
+        );
+    }
+
+    #[test]
+    fn unknown_ssl_modes_are_rejected() {
+        let err = parse("postgres://db/app?sslmode=sometimes").unwrap_err();
+        assert_eq!(
+            err,
+            "unsupported sslmode \"sometimes\", expected disable, allow, prefer, require, \
+             verify-ca or verify-full"
+        );
+        let err = parse("mysql://db/shop?sslMode=ON").unwrap_err();
+        assert_eq!(
+            err,
+            "unsupported sslMode \"ON\", expected DISABLED, PREFERRED, REQUIRED, VERIFY_CA or \
+             VERIFY_IDENTITY"
+        );
     }
 }

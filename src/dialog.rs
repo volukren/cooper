@@ -1,7 +1,12 @@
 use rune::{Cx, El, Tx};
 
 use crate::{
-    browser::{self, confirm::Confirm, ddl},
+    browser::{
+        self,
+        confirm::Confirm,
+        ddl,
+        table::key_picker::{self, KeyPicker},
+    },
     form::{self, FormDialog},
     help::{self, Help},
     keys::{Command, Ctx},
@@ -17,6 +22,7 @@ pub enum Dialog {
     Settings(Box<Settings>),
     Ddl(TabId),
     Confirm(Box<Confirm>),
+    KeyPicker(Box<KeyPicker>),
 }
 
 impl Dialog {
@@ -28,6 +34,7 @@ impl Dialog {
             | Dialog::Settings(_) => None,
             Dialog::Ddl(tab) => Some(*tab),
             Dialog::Confirm(c) => Some(c.tab),
+            Dialog::KeyPicker(p) => Some(p.tab),
         }
     }
 
@@ -38,7 +45,8 @@ impl Dialog {
             | Dialog::DeleteConnection(_)
             | Dialog::Settings(_)
             | Dialog::Ddl(_)
-            | Dialog::Confirm(_) => {}
+            | Dialog::Confirm(_)
+            | Dialog::KeyPicker(_) => {}
         }
     }
 }
@@ -54,6 +62,7 @@ pub fn view(s: &Workspace, t: &Theme, cx: &mut Cx<Workspace>, layer: &mut Vec<El
         Dialog::Settings(state) => settings::dialog(s, state, t, cx, layer),
         Dialog::Ddl(tab) => ddl::dialog(s, *tab, t, cx, layer),
         Dialog::Confirm(c) => browser::confirm::dialog(s, c, t, layer),
+        Dialog::KeyPicker(p) => key_picker::dialog(s, p, t, cx, layer),
     }
 }
 

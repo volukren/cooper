@@ -1112,9 +1112,9 @@ mod tests {
                 .collect(),
             full: FullValues::new(),
             opaque: Default::default(),
-            primary_key: Vec::new(),
             offset,
             has_more,
+            ..Page::default()
         }
     }
 

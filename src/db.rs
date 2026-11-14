@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -12,9 +11,13 @@ use std::{
 };
 
 use crate::{
-    connection::{Connection, DbKind},
+    connection::{Connection, DbKind, expand_home},
     guard,
 };
+
+mod tls;
+
+use tls::{Tls, TlsFiles};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 10 });
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
@@ -110,6 +113,16 @@ impl Field {
             opaque: false,
         }
     }
+
+    fn exact(self) -> Option<String> {
+        if self.opaque {
+            return None;
+        }
+        match self.full {
+            Some(full) => (!full.truncated).then_some(full.text),
+            None => self.shown,
+        }
+    }
 }
 
 fn split_fields(fields: Vec<Field>, row: usize, full: &mut FullValues) -> Vec<Option<String>> {
@@ -125,7 +138,130 @@ fn split_fields(fields: Vec<Field>, row: usize, full: &mut FullValues) -> Vec<Op
         .collect()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum KeySource {
+    #[default]
+    None,
+    Primary,
+    Unique(String),
+    RowId,
+    Ctid,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowKey {
+    pub source: KeySource,
+    pub columns: Vec<String>,
+}
+
+impl RowKey {
+    fn primary(columns: Vec<String>) -> Self {
+        let source = if columns.is_empty() {
+            KeySource::None
+        } else {
+            KeySource::Primary
+        };
+        Self { source, columns }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexKey {
+    name: String,
+    primary: bool,
+    columns: Vec<String>,
+    usable: bool,
+}
+
+fn choose_key(indexes: Vec<IndexKey>) -> Option<RowKey> {
+    let mut indexes: Vec<IndexKey> = indexes
+        .into_iter()
+        .filter(|index| !index.columns.is_empty())
+        .collect();
+    if let Some(at) = indexes.iter().position(|index| index.primary) {
+        return Some(RowKey {
+            source: KeySource::Primary,
+            columns: indexes.swap_remove(at).columns,
+        });
+    }
+    indexes
+        .into_iter()
+        .filter(|index| index.usable)
+        .min_by(|a, b| (a.columns.len(), &a.name).cmp(&(b.columns.len(), &b.name)))
+        .map(|index| RowKey {
+            source: KeySource::Unique(index.name),
+            columns: index.columns,
+        })
+}
+
+pub fn comparable(kind: DbKind, type_name: &str) -> bool {
+    let name = type_name.trim().to_lowercase();
+    let name = name.trim_end_matches("[]");
+    let base = name.split('(').next().unwrap_or_default().trim();
+    match kind {
+        DbKind::Postgres => !PG_INEXACT.contains(&base),
+        DbKind::MySql => !MYSQL_INEXACT.contains(&base.split(' ').next().unwrap_or_default()),
+        DbKind::Sqlite => sqlite_comparable(name),
+    }
+}
+
+const PG_INEXACT: [&str; 12] = [
+    "json",
+    "xml",
+    "point",
+    "line",
+    "lseg",
+    "box",
+    "path",
+    "polygon",
+    "circle",
+    "bytea",
+    "real",
+    "double precision",
+];
+
+const MYSQL_INEXACT: [&str; 20] = [
+    "float",
+    "double",
+    "real",
+    "json",
+    "bit",
+    "binary",
+    "varbinary",
+    "tinyblob",
+    "blob",
+    "mediumblob",
+    "longblob",
+    "geometry",
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+    "geometrycollection",
+    "vector",
+];
+
+fn sqlite_comparable(name: &str) -> bool {
+    let has = |parts: &[&str]| parts.iter().any(|part| name.contains(part));
+    if name.is_empty() || name == "any" {
+        false
+    } else if has(&["int", "char", "clob", "text"]) {
+        true
+    } else {
+        !has(&["blob", "real", "floa", "doub"])
+    }
+}
+
+fn comparable_columns(kind: DbKind, columns: &[ColumnInfo]) -> Vec<bool> {
+    columns
+        .iter()
+        .map(|column| comparable(kind, &column.type_name))
+        .collect()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Page {
     pub schema: String,
     pub table: String,
@@ -133,7 +269,10 @@ pub struct Page {
     pub rows: Vec<Vec<Option<String>>>,
     pub full: FullValues,
     pub opaque: OpaqueCells,
-    pub primary_key: Vec<String>,
+    pub key: RowKey,
+    pub hidden: Vec<String>,
+    pub ids: Vec<Vec<Option<String>>>,
+    pub comparable: Vec<bool>,
     pub offset: u64,
     pub has_more: bool,
 }
@@ -142,7 +281,7 @@ pub struct Page {
 pub struct RowUpdate {
     pub schema: String,
     pub table: String,
-    pub key: Vec<(String, String)>,
+    pub key: Vec<(String, Option<String>)>,
     pub values: Vec<(String, Option<String>)>,
 }
 
@@ -946,15 +1085,23 @@ fn execute(backend: &mut dyn Backend, request: &Request) -> Result<Response, Fai
             let TableRows {
                 columns,
                 rows,
-                primary_key,
+                key,
+                hidden,
+                comparable,
             } = backend.rows(schema, table, *offset, *limit)?;
             let (rows, has_more) = split_page(rows, *limit);
+            let visible = columns.len();
+            let mut ids = Vec::new();
             let mut full = FullValues::new();
             let mut opaque = OpaqueCells::new();
             let rows = rows
                 .into_iter()
                 .enumerate()
-                .map(|(row, fields)| {
+                .map(|(row, mut fields)| {
+                    if !hidden.is_empty() {
+                        let extra = fields.split_off(visible.min(fields.len()));
+                        ids.push(extra.into_iter().map(Field::exact).collect());
+                    }
                     for (column, field) in fields.iter().enumerate() {
                         if field.opaque {
                             opaque.insert((row, column));
@@ -972,7 +1119,10 @@ fn execute(backend: &mut dyn Backend, request: &Request) -> Result<Response, Fai
                     rows,
                     full,
                     opaque,
-                    primary_key,
+                    key,
+                    hidden,
+                    ids,
+                    comparable,
                     offset: *offset,
                     has_more,
                 },
@@ -1004,7 +1154,16 @@ type Rows = Vec<Vec<Field>>;
 struct TableRows {
     columns: Vec<ColumnInfo>,
     rows: Rows,
-    primary_key: Vec<String>,
+    key: RowKey,
+    hidden: Vec<String>,
+    comparable: Vec<bool>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Identity {
+    key: RowKey,
+    hidden: Vec<String>,
+    order: Vec<String>,
 }
 
 trait Backend: Send {
@@ -1063,15 +1222,23 @@ fn select_sql(
     kind: DbKind,
     schema: &str,
     table: &str,
-    primary_key: &[String],
+    extra: &[String],
+    order: &[String],
     offset: u64,
     limit: u32,
 ) -> Result<String, String> {
-    let mut sql = format!("SELECT * FROM {}", qualified(kind, schema, table)?);
-    if !primary_key.is_empty() {
-        let columns: Vec<String> = primary_key.iter().map(|c| quote_ident(kind, c)).collect();
+    let quoted = |names: &[String]| -> Vec<String> {
+        names.iter().map(|name| quote_ident(kind, name)).collect()
+    };
+    let mut sql = String::from("SELECT *");
+    for item in quoted(extra) {
+        sql.push_str(", ");
+        sql.push_str(&item);
+    }
+    sql.push_str(&format!(" FROM {}", qualified(kind, schema, table)?));
+    if !order.is_empty() {
         sql.push_str(" ORDER BY ");
-        sql.push_str(&columns.join(", "));
+        sql.push_str(&quoted(order).join(", "));
     }
     sql.push_str(&format!(" LIMIT {} OFFSET {offset}", u64::from(limit) + 1));
     Ok(sql)
@@ -1097,7 +1264,10 @@ pub(crate) fn update_sql(
     let filter: Vec<String> = update
         .key
         .iter()
-        .map(|(column, old)| format!("{} = {}", quote_ident(kind, column), value(Some(old))))
+        .map(|(column, old)| match old {
+            Some(old) => format!("{} = {}", quote_ident(kind, column), value(Some(old))),
+            None => format!("{} IS NULL", quote_ident(kind, column)),
+        })
         .collect();
     Ok(format!(
         "UPDATE {target} SET {} WHERE {}",
@@ -1115,7 +1285,7 @@ fn update_params(update: &RowUpdate) -> Vec<&str> {
         .values
         .iter()
         .filter_map(|(_, value)| value.as_deref())
-        .chain(update.key.iter().map(|(_, value)| value.as_str()))
+        .chain(update.key.iter().filter_map(|(_, value)| value.as_deref()))
         .collect()
 }
 
@@ -1128,6 +1298,8 @@ fn pg_literal(text: &str) -> String {
     }
 }
 
+pub const MANY_ROWS: &str = "the row's key matches";
+
 fn matched_one(matched: u64) -> Result<(), Failure> {
     match matched {
         1 => Ok(()),
@@ -1136,7 +1308,7 @@ fn matched_one(matched: u64) -> Result<(), Failure> {
                   (nothing was saved)"
                 .into(),
         ),
-        n => Err(format!("the row's key matches {n} rows (nothing was saved)").into()),
+        n => Err(format!("{MANY_ROWS} {n} rows (nothing was saved)").into()),
     }
 }
 
@@ -1287,6 +1459,7 @@ struct PgBackend {
 
 impl PgBackend {
     fn connect(conn: &Connection, password: Option<&str>) -> Result<Self, Failure> {
+        let settings = Tls::load(conn)?;
         let user = if conn.user.is_empty() {
             os_user().unwrap_or_else(|| "postgres".to_string())
         } else {
@@ -1298,7 +1471,7 @@ impl PgBackend {
             .port(conn.port.unwrap_or(5432))
             .user(&user)
             .application_name("cooper")
-            .ssl_mode(tokio_postgres::config::SslMode::Prefer)
+            .ssl_mode(settings.postgres_mode())
             .connect_timeout(CONNECT_TIMEOUT)
             .keepalives(true)
             .keepalives_idle(KEEPALIVE_IDLE)
@@ -1311,16 +1484,11 @@ impl PgBackend {
         if let Some(password) = password {
             config.password(password);
         }
-        let connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .map_err(|err| format!("TLS setup failed: {}", error_chain(&err)))?;
-        let tls = postgres_native_tls::MakeTlsConnector::new(connector);
+        let tls = postgres_native_tls::MakeTlsConnector::new(settings.connector()?);
         let runtime = pg_runtime()?;
         let (client, connection) = runtime
             .block_on(config.connect(tls.clone()))
-            .map_err(pg_error)?;
+            .map_err(|err| settings.explain_postgres(pg_error(err)))?;
         runtime.spawn(connection);
         if conn.read_only {
             runtime
@@ -1352,18 +1520,52 @@ impl PgBackend {
             .collect()
     }
 
+    #[cfg(test)]
     fn primary_key(&mut self, schema: &str, table: &str) -> Result<Vec<String>, Failure> {
-        let rows = self.strings(
-            "SELECT a.attname::text \
-             FROM pg_catalog.pg_index i \
-             JOIN pg_catalog.pg_class c ON c.oid = i.indrelid \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) \
-             WHERE i.indisprimary AND n.nspname = $1::text AND c.relname = $2::text \
-             ORDER BY array_position(i.indkey::int2[], a.attnum)",
-            &[&schema, &table],
-        )?;
-        Ok(rows.into_iter().flatten().collect())
+        Ok(self
+            .relation(schema, table)?
+            .into_iter()
+            .flat_map(|relation| relation.index_keys)
+            .find(|index| index.primary)
+            .map(|index| index.columns)
+            .unwrap_or_default())
+    }
+
+    fn relation(&mut self, schema: &str, table: &str) -> Result<Option<PgRelation>, Failure> {
+        let rows = self.strings(PG_INDEX_KEYS, &[&schema, &table])?;
+        Ok(pg_relation(rows))
+    }
+
+    fn identity(&mut self, schema: &str, table: &str) -> Result<Identity, Failure> {
+        let Some(PgRelation {
+            kind,
+            children,
+            index_keys,
+        }) = self.relation(schema, table)?
+        else {
+            return Ok(Identity::default());
+        };
+        if kind != "r" && kind != "p" {
+            return Ok(Identity::default());
+        }
+        if let Some(mut key) = choose_key(index_keys) {
+            let mut hidden = Vec::new();
+            if kind == "r" && children {
+                key.columns.push("tableoid".to_string());
+                hidden.push("tableoid".to_string());
+            }
+            let order = key.columns.clone();
+            return Ok(Identity { key, hidden, order });
+        }
+        let columns: Vec<String> = ["tableoid", "ctid", "xmin"].map(String::from).into();
+        Ok(Identity {
+            key: RowKey {
+                source: KeySource::Ctid,
+                columns: columns.clone(),
+            },
+            hidden: columns,
+            order: Vec::new(),
+        })
     }
 
     fn first_column(
@@ -1473,6 +1675,78 @@ impl PgBackend {
 }
 
 const PG_READ_ONLY: &str = "SET default_transaction_read_only = on";
+
+const PG_INDEX_KEYS: &str = "\
+    SELECT c.relkind::text, c.relhassubclass::text, coalesce(ik.index_name, ''), \
+           coalesce(ik.is_primary, ''), coalesce(ik.attname, ''), coalesce(ik.not_null, ''), \
+           coalesce(ik.type_name, '') \
+    FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+    LEFT JOIN LATERAL ( \
+        SELECT ic.relname::text AS index_name, i.indisprimary::text AS is_primary, \
+               a.attname::text AS attname, \
+               (a.attnotnull AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_catalog.pg_constraint pc \
+                   WHERE pc.conrelid = c.oid AND pc.contype = 'n' AND NOT pc.convalidated \
+                     AND a.attnum = ANY (pc.conkey)))::text AS not_null, \
+               pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_name, k.ord \
+        FROM pg_catalog.pg_index i \
+        JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid \
+        JOIN LATERAL pg_catalog.unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+          ON true \
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum \
+        WHERE i.indrelid = c.oid \
+          AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL \
+          AND k.ord <= coalesce((pg_catalog.to_jsonb(i)->>'indnkeyatts')::int, i.indnatts) \
+    ) ik ON true \
+    WHERE n.nspname = $1::text AND c.relname = $2::text \
+    ORDER BY ik.index_name, ik.ord";
+
+struct PgRelation {
+    kind: String,
+    children: bool,
+    index_keys: Vec<IndexKey>,
+}
+
+fn pg_relation(rows: Vec<Vec<String>>) -> Option<PgRelation> {
+    let (kind, children) = match rows.first()?.as_slice() {
+        [kind, children, ..] => (kind.clone(), children == "true"),
+        _ => return None,
+    };
+    let keys = rows
+        .into_iter()
+        .filter(|row| row.get(2).is_some_and(|index| !index.is_empty()))
+        .map(|row| row.into_iter().skip(2).collect())
+        .collect();
+    Some(PgRelation {
+        kind,
+        children,
+        index_keys: pg_index_keys(keys),
+    })
+}
+
+fn pg_index_keys(rows: Vec<Vec<String>>) -> Vec<IndexKey> {
+    let mut indexes: Vec<IndexKey> = Vec::new();
+    for row in rows {
+        let [name, primary, column, not_null, type_name] = row.as_slice() else {
+            continue;
+        };
+        let usable = not_null == "true" && comparable(DbKind::Postgres, type_name);
+        match indexes.last_mut() {
+            Some(index) if &index.name == name => {
+                index.columns.push(column.clone());
+                index.usable &= usable;
+            }
+            _ => indexes.push(IndexKey {
+                name: name.clone(),
+                primary: primary == "true",
+                columns: vec![column.clone()],
+                usable,
+            }),
+        }
+    }
+    indexes
+}
 
 const PG_RELATION: &str = "\
     SELECT c.oid::text, c.relkind::text, c.relpersistence::text, \
@@ -1658,9 +1932,17 @@ impl Backend for PgBackend {
         offset: u64,
         limit: u32,
     ) -> Result<TableRows, Failure> {
-        let primary_key = self.primary_key(schema, table)?;
+        let identity = self.identity(schema, table)?;
         let mut types = self.column_types(schema, table)?;
-        let sql = select_sql(DbKind::Postgres, schema, table, &primary_key, offset, limit)?;
+        let sql = select_sql(
+            DbKind::Postgres,
+            schema,
+            table,
+            &identity.hidden,
+            &identity.order,
+            offset,
+            limit,
+        )?;
         let mut names = Vec::new();
         let mut raw = Vec::new();
         let messages = self
@@ -1676,19 +1958,24 @@ impl Backend for PgBackend {
                 _ => {}
             }
         }
-        if types.len() != names.len() {
-            types = vec![String::new(); names.len()];
+        let visible = names.len().saturating_sub(identity.hidden.len());
+        if types.len() != visible {
+            types = vec![String::new(); visible];
         }
+        types.resize(names.len(), String::new());
         let rows = raw.iter().map(|row| pg_cells(row, &types)).collect();
-        let columns = names
+        let columns: Vec<ColumnInfo> = names
             .into_iter()
             .zip(types)
+            .take(visible)
             .map(|(name, type_name)| ColumnInfo { name, type_name })
             .collect();
         Ok(TableRows {
+            comparable: comparable_columns(DbKind::Postgres, &columns),
             columns,
             rows,
-            primary_key,
+            key: identity.key,
+            hidden: identity.hidden,
         })
     }
 
@@ -1804,7 +2091,9 @@ const MYSQL_SYSTEM_SCHEMAS: [&str; 4] =
 struct MyBackend {
     conn: mysql::Conn,
     opts: mysql::Opts,
+    tls_files: Option<Arc<TlsFiles>>,
     database: String,
+    gipk: HashMap<(String, String), bool>,
 }
 
 impl MyBackend {
@@ -1814,6 +2103,8 @@ impl MyBackend {
         } else {
             Some(conn.user.clone())
         };
+        let settings = Tls::load(conn)?;
+        let (ssl_opts, tls_files) = settings.mysql()?;
         let opts = |tls: bool| {
             let builder = mysql::OptsBuilder::new()
                 .ip_or_hostname(Some(host_or_local(&conn.host)))
@@ -1824,11 +2115,7 @@ impl MyBackend {
                 .prefer_socket(false)
                 .tcp_connect_timeout(Some(CONNECT_TIMEOUT))
                 .tcp_keepalive_time_ms(Some(KEEPALIVE_IDLE.as_millis() as u32))
-                .ssl_opts(tls.then(|| {
-                    mysql::SslOpts::default()
-                        .with_danger_accept_invalid_certs(true)
-                        .with_danger_skip_domain_validation(true)
-                }));
+                .ssl_opts(ssl_opts.clone().filter(|_| tls));
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let builder = builder
                 .tcp_keepalive_probe_interval_secs(Some(KEEPALIVE_INTERVAL.as_secs() as u32))
@@ -1840,13 +2127,18 @@ impl MyBackend {
         let mut used = opts(true);
         let connected = match mysql::Conn::new(used.clone()) {
             Err(mysql::Error::TlsError(_))
-            | Err(mysql::Error::DriverError(mysql::DriverError::TlsNotSupported)) => {
+            | Err(mysql::Error::DriverError(mysql::DriverError::TlsNotSupported))
+                if settings.falls_back_to_plain_text() =>
+            {
                 used = opts(false);
                 mysql::Conn::new(used.clone())
             }
             other => other,
         };
-        let mut connected = connected.map_err(my_error)?;
+        let mut connected = connected.map_err(|err| match err {
+            mysql::Error::TlsError(_) => settings.explain(error_chain(&err)).into(),
+            other => my_error(other),
+        })?;
         if conn.read_only {
             use mysql::prelude::Queryable;
             connected
@@ -1855,8 +2147,10 @@ impl MyBackend {
         }
         Ok(Self {
             conn: connected,
+            tls_files: tls_files.filter(|_| used.get_ssl_opts().is_some()),
             opts: used,
             database: conn.database.clone(),
+            gipk: HashMap::new(),
         })
     }
 
@@ -1872,6 +2166,126 @@ impl MyBackend {
             .map(|row| row.unwrap().into_iter().map(my_plain_text).collect())
             .collect())
     }
+
+    fn columns(&mut self, schema: &str, table: &str) -> Result<Vec<MyColumn>, Failure> {
+        let rows = self.strings(
+            "SELECT COLUMN_NAME, COLUMN_TYPE, EXTRA FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+            (schema, table),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row.as_slice() {
+                [name, type_name, extra] => Some(MyColumn {
+                    name: name.clone(),
+                    type_name: type_name.clone(),
+                    invisible: extra
+                        .split_whitespace()
+                        .any(|word| word.eq_ignore_ascii_case("invisible")),
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn identity(
+        &mut self,
+        schema: &str,
+        table: &str,
+        columns: &[MyColumn],
+    ) -> Result<Identity, Failure> {
+        let rows = self.strings(MYSQL_INDEX_KEYS, (schema, table))?;
+        if let Some(key) = choose_key(my_index_keys(rows, columns)) {
+            let hidden = key
+                .columns
+                .iter()
+                .filter(|name| {
+                    columns
+                        .iter()
+                        .any(|column| column.invisible && column.name.eq_ignore_ascii_case(name))
+                })
+                .cloned()
+                .collect();
+            return Ok(Identity {
+                order: key.columns.clone(),
+                key,
+                hidden,
+            });
+        }
+        let listed = columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(MYSQL_GIPK));
+        if listed || !self.has_hidden_gipk(schema, table)? {
+            return Ok(Identity::default());
+        }
+        let columns = vec![MYSQL_GIPK.to_string()];
+        Ok(Identity {
+            key: RowKey::primary(columns.clone()),
+            hidden: columns.clone(),
+            order: columns,
+        })
+    }
+
+    fn has_hidden_gipk(&mut self, schema: &str, table: &str) -> Result<bool, Failure> {
+        use mysql::prelude::Queryable;
+        let name = (schema.to_string(), table.to_string());
+        if let Some(&known) = self.gipk.get(&name) {
+            return Ok(known);
+        }
+        let sql = format!(
+            "SELECT {} FROM {} LIMIT 0",
+            quote_ident(DbKind::MySql, MYSQL_GIPK),
+            qualified(DbKind::MySql, schema, table)?
+        );
+        let found = match self.conn.query_drop(sql) {
+            Ok(()) => true,
+            Err(mysql::Error::MySqlError(_)) => false,
+            Err(other) => return Err(my_error(other)),
+        };
+        self.gipk.insert(name, found);
+        Ok(found)
+    }
+}
+
+struct MyColumn {
+    name: String,
+    type_name: String,
+    invisible: bool,
+}
+
+const MYSQL_GIPK: &str = "my_row_id";
+
+const MYSQL_INDEX_KEYS: &str = "\
+    SELECT INDEX_NAME, COLUMN_NAME, NULLABLE FROM information_schema.STATISTICS \
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND NON_UNIQUE = 0 \
+    ORDER BY INDEX_NAME, SEQ_IN_INDEX";
+
+fn my_index_keys(rows: Vec<Vec<String>>, columns: &[MyColumn]) -> Vec<IndexKey> {
+    let mut indexes: Vec<IndexKey> = Vec::new();
+    for row in rows {
+        let [name, column, nullable] = row.as_slice() else {
+            continue;
+        };
+        let usable = !column.is_empty()
+            && nullable.is_empty()
+            && columns.iter().any(|listed| {
+                listed.name.eq_ignore_ascii_case(column)
+                    && comparable(DbKind::MySql, &listed.type_name)
+            });
+        match indexes.last_mut() {
+            Some(index) if &index.name == name => {
+                index.columns.push(column.clone());
+                index.usable &= usable;
+            }
+            _ => indexes.push(IndexKey {
+                name: name.clone(),
+                primary: name == "PRIMARY",
+                columns: vec![column.clone()],
+                usable,
+            }),
+        }
+    }
+    indexes
 }
 
 const MYSQL_READ_ONLY: &str = "SET SESSION TRANSACTION READ ONLY";
@@ -2047,6 +2461,7 @@ impl Backend for MyBackend {
     }
 
     fn tables(&mut self, schema: &str) -> Result<Vec<TableInfo>, Failure> {
+        self.gipk.clear();
         let rows = self.strings(
             "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
@@ -2075,26 +2490,22 @@ impl Backend for MyBackend {
         limit: u32,
     ) -> Result<TableRows, Failure> {
         use mysql::prelude::Queryable;
-        let primary_key: Vec<String> = self
-            .strings(
-                "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' \
-                 ORDER BY ORDINAL_POSITION",
-                (schema, table),
-            )?
+        let listed = self.columns(schema, table)?;
+        let identity = self.identity(schema, table, &listed)?;
+        let types: Vec<String> = listed
             .into_iter()
-            .flatten()
+            .filter(|column| !column.invisible)
+            .map(|column| column.type_name)
             .collect();
-        let types: Vec<String> = self
-            .strings(
-                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS \
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
-                (schema, table),
-            )?
-            .into_iter()
-            .flatten()
-            .collect();
-        let sql = select_sql(DbKind::MySql, schema, table, &primary_key, offset, limit)?;
+        let sql = select_sql(
+            DbKind::MySql,
+            schema,
+            table,
+            &identity.hidden,
+            &identity.order,
+            offset,
+            limit,
+        )?;
         let mut result = self.conn.query_iter(sql).map_err(my_error)?;
         let described: Vec<mysql::Column> = result.columns().as_ref().to_vec();
         let binary: Vec<bool> = described.iter().map(my_is_binary).collect();
@@ -2102,8 +2513,9 @@ impl Backend for MyBackend {
         for row in result.by_ref() {
             rows.push(my_cells(row.map_err(my_error)?, &binary));
         }
-        let known = types.len() == described.len();
-        let columns = described
+        let visible = described.len().saturating_sub(identity.hidden.len());
+        let known = types.len() == visible;
+        let columns: Vec<ColumnInfo> = described[..visible]
             .iter()
             .enumerate()
             .map(|(i, column)| ColumnInfo {
@@ -2116,9 +2528,11 @@ impl Backend for MyBackend {
             })
             .collect();
         Ok(TableRows {
+            comparable: comparable_columns(DbKind::MySql, &columns),
             columns,
             rows,
-            primary_key,
+            key: identity.key,
+            hidden: identity.hidden,
         })
     }
 
@@ -2219,8 +2633,10 @@ impl Backend for MyBackend {
                 .read_timeout(Some(CONNECT_TIMEOUT))
                 .write_timeout(Some(CONNECT_TIMEOUT)),
         );
+        let tls_files = self.tls_files.clone();
         Some(Arc::new(move || {
             use mysql::prelude::Queryable;
+            let _tls_files = &tls_files;
             if let Ok(mut killer) = mysql::Conn::new(opts.clone()) {
                 let _ = killer.query_drop(format!("KILL QUERY {id}"));
             }
@@ -2271,27 +2687,138 @@ impl SqliteBackend {
         Ok(Self { conn })
     }
 
-    fn primary_key(&self, schema: &str, table: &str) -> Result<Vec<String>, Failure> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT name FROM pragma_table_info(?1, ?2) WHERE pk > 0 ORDER BY pk")
-            .map_err(sqlite_error)?;
-        let names = statement
-            .query_map([table, schema], |row| row.get::<_, String>(0))
+    fn query<T>(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+        read: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, Failure> {
+        let mut statement = self.conn.prepare(sql).map_err(sqlite_error)?;
+        let rows = statement
+            .query_map(params, read)
             .map_err(sqlite_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_error)?;
-        Ok(names)
+        Ok(rows)
+    }
+
+    fn identity(&self, schema: &str, table: &str) -> Result<Identity, Failure> {
+        let sql = format!(
+            "SELECT type FROM {} WHERE name = ?1 AND type IN ('table', 'view')",
+            qualified(DbKind::Sqlite, schema, "sqlite_master")?
+        );
+        let kinds = self.query(&sql, [table], |row| row.get::<_, String>(0))?;
+        if kinds.first().map(String::as_str) != Some("table") {
+            return Ok(Identity::default());
+        }
+        let columns = self.query(
+            "SELECT name, type, \"notnull\", pk FROM pragma_table_xinfo(?1, ?2)",
+            [table, schema],
+            |row| {
+                Ok(SqliteColumn {
+                    name: row.get(0)?,
+                    type_name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    not_null: row.get::<_, i64>(2)? != 0,
+                    pk: row.get(3)?,
+                })
+            },
+        )?;
+        let mut primary: Vec<&SqliteColumn> = columns.iter().filter(|c| c.pk > 0).collect();
+        primary.sort_by_key(|column| column.pk);
+        let key = if primary.is_empty() {
+            choose_key(self.unique_indexes(schema, table, &columns)?)
+        } else {
+            Some(RowKey::primary(
+                primary.iter().map(|column| column.name.clone()).collect(),
+            ))
+        };
+        if let Some(key) = key {
+            return Ok(Identity {
+                order: key.columns.clone(),
+                key,
+                hidden: Vec::new(),
+            });
+        }
+        let alias = ["rowid", "_rowid_", "oid"].into_iter().find(|alias| {
+            !columns
+                .iter()
+                .any(|column| column.name.eq_ignore_ascii_case(alias))
+        });
+        Ok(alias.map_or_else(Identity::default, |alias| Identity {
+            key: RowKey {
+                source: KeySource::RowId,
+                columns: vec![alias.to_string()],
+            },
+            hidden: vec![alias.to_string()],
+            order: vec![alias.to_string()],
+        }))
+    }
+
+    fn unique_indexes(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[SqliteColumn],
+    ) -> Result<Vec<IndexKey>, Failure> {
+        let names = self.query(
+            "SELECT name FROM pragma_index_list(?1, ?2) \
+             WHERE \"unique\" = 1 AND partial = 0 AND origin IN ('u', 'c') ORDER BY name",
+            [table, schema],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut indexes = Vec::with_capacity(names.len());
+        for name in names {
+            let parts = self.query(
+                "SELECT cid, name, coll FROM pragma_index_xinfo(?1, ?2) \
+                 WHERE key = 1 ORDER BY seqno",
+                [name.as_str(), schema],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )?;
+            let usable = parts.iter().all(|(cid, part, coll)| {
+                *cid >= 0
+                    && columns.iter().any(|column| {
+                        Some(&column.name) == part.as_ref()
+                            && column.not_null
+                            && comparable(DbKind::Sqlite, &column.type_name)
+                            && self
+                                .collation(schema, table, &column.name)
+                                .zip(coll.as_deref())
+                                .is_some_and(|(own, coll)| own.eq_ignore_ascii_case(coll))
+                    })
+            });
+            indexes.push(IndexKey {
+                name,
+                primary: false,
+                columns: parts.into_iter().filter_map(|(_, part, _)| part).collect(),
+                usable,
+            });
+        }
+        Ok(indexes)
+    }
+
+    fn collation(&self, schema: &str, table: &str, column: &str) -> Option<String> {
+        let (_, collation, ..) = self
+            .conn
+            .column_metadata(Some(schema), table, column)
+            .ok()?;
+        Some(collation.map_or_else(
+            || "BINARY".to_string(),
+            |collation| collation.to_string_lossy().into_owned(),
+        ))
     }
 }
 
-fn expand_home(path: &str) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| PathBuf::from(path)),
-        None => PathBuf::from(path),
-    }
+struct SqliteColumn {
+    name: String,
+    type_name: String,
+    not_null: bool,
+    pk: i64,
 }
 
 fn sqlite_error(err: rusqlite::Error) -> Failure {
@@ -2323,7 +2850,13 @@ fn sqlite_render(value: rusqlite::types::ValueRef<'_>) -> Field {
         ValueRef::Null => Field::default(),
         ValueRef::Integer(n) => Field::shown(n.to_string()),
         ValueRef::Real(n) => Field::shown(n.to_string()),
-        ValueRef::Text(bytes) => Field::text(&String::from_utf8_lossy(bytes)),
+        ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => Field::text(text),
+            Err(_) => Field {
+                opaque: true,
+                ..Field::text(&String::from_utf8_lossy(bytes))
+            },
+        },
         ValueRef::Blob(bytes) => Field::opaque(render_bytes(bytes)),
     }
 }
@@ -2378,19 +2911,31 @@ impl Backend for SqliteBackend {
         offset: u64,
         limit: u32,
     ) -> Result<TableRows, Failure> {
-        let primary_key = self.primary_key(schema, table)?;
-        let sql = select_sql(DbKind::Sqlite, schema, table, &primary_key, offset, limit)?;
+        let identity = self.identity(schema, table)?;
+        let sql = select_sql(
+            DbKind::Sqlite,
+            schema,
+            table,
+            &identity.hidden,
+            &identity.order,
+            offset,
+            limit,
+        )?;
         let mut statement = self.conn.prepare(&sql).map_err(sqlite_error)?;
-        let columns = sqlite_columns(&statement);
+        let width = statement.column_count();
+        let mut columns = sqlite_columns(&statement);
+        columns.truncate(width.saturating_sub(identity.hidden.len()));
         let mut rows = Vec::new();
         let mut cursor = statement.query([]).map_err(sqlite_error)?;
         while let Some(row) = cursor.next().map_err(sqlite_error)? {
-            rows.push(sqlite_cells(row, columns.len()));
+            rows.push(sqlite_cells(row, width));
         }
         Ok(TableRows {
+            comparable: comparable_columns(DbKind::Sqlite, &columns),
             columns,
             rows,
-            primary_key,
+            key: identity.key,
+            hidden: identity.hidden,
         })
     }
 

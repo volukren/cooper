@@ -1,11 +1,11 @@
-use std::{fmt, fs, io::Write, path::PathBuf};
+use std::{collections::HashMap, fmt, fs, io::Write, path::PathBuf};
 
 use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
 };
 use serde::{Deserialize, Serialize};
-use toml_edit::{ArrayOfTables, DocumentMut, Item};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,6 +118,45 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+impl SslMode {
+    pub const ALL: [SslMode; 5] = [
+        SslMode::Disable,
+        SslMode::Prefer,
+        SslMode::Require,
+        SslMode::VerifyCa,
+        SslMode::VerifyFull,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SslMode::Disable => "Disable",
+            SslMode::Prefer => "Prefer",
+            SslMode::Require => "Require",
+            SslMode::VerifyCa => "Verify CA",
+            SslMode::VerifyFull => "Verify Full",
+        }
+    }
+
+    pub fn uses_tls(self) -> bool {
+        self != SslMode::Disable
+    }
+
+    fn is_default(&self) -> bool {
+        *self == SslMode::default()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub name: String,
@@ -138,6 +177,14 @@ pub struct Connection {
     pub password_storage: PasswordStorage,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub password: String,
+    #[serde(default, skip_serializing_if = "SslMode::is_default")]
+    pub ssl_mode: SslMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssl_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssl_cert: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssl_ca: String,
 }
 
 impl fmt::Debug for Connection {
@@ -154,6 +201,10 @@ impl fmt::Debug for Connection {
             .field("database", &self.database)
             .field("password_storage", &self.password_storage)
             .field("password", &password)
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_key", &self.ssl_key)
+            .field("ssl_cert", &self.ssl_cert)
+            .field("ssl_ca", &self.ssl_ca)
             .finish()
     }
 }
@@ -189,8 +240,11 @@ struct ConnectionsFile {
     connections: Vec<Connection>,
 }
 
+pub type RowKeys = HashMap<(String, String), Vec<String>>;
+
 const CONNECTIONS_KEY: &str = "connection";
-const MANAGED_KEYS: [&str; 10] = [
+const ROW_KEY: &str = "row_key";
+const MANAGED_KEYS: [&str; 14] = [
     "name",
     "kind",
     "tag",
@@ -201,6 +255,10 @@ const MANAGED_KEYS: [&str; 10] = [
     "database",
     "password_storage",
     "password",
+    "ssl_mode",
+    "ssl_key",
+    "ssl_cert",
+    "ssl_ca",
 ];
 
 #[derive(Debug)]
@@ -369,9 +427,104 @@ impl Store {
         self.write(&doc)
     }
 
+    pub fn row_keys(&self) -> HashMap<String, RowKeys> {
+        let doc = read_optional(&self.path)
+            .ok()
+            .flatten()
+            .and_then(|data| data.parse::<DocumentMut>().ok());
+        let Some(tables) = doc
+            .as_ref()
+            .and_then(|doc| doc.get(CONNECTIONS_KEY))
+            .and_then(Item::as_array_of_tables)
+        else {
+            return HashMap::new();
+        };
+        tables
+            .iter()
+            .filter_map(|table| {
+                let name = table.get("name").and_then(Item::as_str)?;
+                let keys: RowKeys = table
+                    .get(ROW_KEY)
+                    .and_then(Item::as_array_of_tables)?
+                    .iter()
+                    .filter_map(row_key)
+                    .collect();
+                (!keys.is_empty()).then(|| (name.to_string(), keys))
+            })
+            .collect()
+    }
+
+    pub fn set_row_key(
+        &self,
+        connection: &str,
+        schema: &str,
+        table: &str,
+        columns: Option<&[String]>,
+    ) -> Result<()> {
+        let data = read_optional(&self.path)?
+            .ok_or_else(|| eyre!("{} does not exist", self.path.display()))?;
+        let mut doc: DocumentMut = data
+            .parse()
+            .wrap_err_with(|| format!("parsing {}", self.path.display()))?;
+        let entry = doc
+            .get_mut(CONNECTIONS_KEY)
+            .and_then(Item::as_array_of_tables_mut)
+            .and_then(|tables| {
+                tables
+                    .iter_mut()
+                    .find(|t| t.get("name").and_then(Item::as_str) == Some(connection))
+            })
+            .ok_or_else(|| {
+                eyre!(
+                    "connection \"{connection}\" not found in {}",
+                    self.path.display()
+                )
+            })?;
+        let keys = entry
+            .entry(ROW_KEY)
+            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()))
+            .as_array_of_tables_mut()
+            .ok_or_else(|| {
+                eyre!(
+                    "`{ROW_KEY}` of \"{connection}\" in {} is not an array of tables \
+                     ([[{CONNECTIONS_KEY}.{ROW_KEY}]])",
+                    self.path.display()
+                )
+            })?;
+        keys.retain(|key| {
+            key.get("schema").and_then(Item::as_str) != Some(schema)
+                || key.get("table").and_then(Item::as_str) != Some(table)
+        });
+        if let Some(columns) = columns {
+            let mut key = Table::new();
+            key.insert("schema", toml_edit::value(schema));
+            key.insert("table", toml_edit::value(table));
+            key.insert(
+                "columns",
+                toml_edit::value(columns.iter().map(String::as_str).collect::<Array>()),
+            );
+            keys.push(key);
+        }
+        if keys.is_empty() {
+            entry.remove(ROW_KEY);
+        }
+        self.write(&doc)
+    }
+
     fn write(&self, doc: &DocumentMut) -> Result<()> {
         write_private(&self.path, &doc.to_string())
     }
+}
+
+fn row_key(key: &Table) -> Option<((String, String), Vec<String>)> {
+    let text = |name: &str| key.get(name).and_then(Item::as_str).map(str::to_string);
+    let columns = key
+        .get("columns")?
+        .as_array()?
+        .iter()
+        .map(|column| column.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    (!columns.is_empty()).then_some(((text("schema")?, text("table")?), columns))
 }
 
 const KEYCHAIN_SERVICE: &str = "cooper";
@@ -403,6 +556,15 @@ pub fn delete_password(name: &str) -> Result<()> {
     match keyring::Entry::new(KEYCHAIN_SERVICE, name)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(err) => Err(err.into()),
+    }
+}
+
+pub fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
     }
 }
 
@@ -591,6 +753,10 @@ database = "app"
             database: "/tmp/archive.db".into(),
             password_storage: PasswordStorage::Keychain,
             password: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         };
         t.store.update("prod", &edited).unwrap();
 
@@ -633,6 +799,10 @@ database = "app"
             database: "shop".into(),
             password_storage: PasswordStorage::Keychain,
             password: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         };
         t.store.update("x", &edited).unwrap();
         let loaded = t.store.load().unwrap();
@@ -671,6 +841,10 @@ password = "s3cret"
             database: "app".into(),
             password_storage: PasswordStorage::Plain,
             password: "s3cret".into(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         }
     }
 
@@ -872,6 +1046,53 @@ password = "s3cret"
         let t = TempStore::new(Some(TWO));
         let loaded = t.store.load().unwrap();
         assert!(loaded.iter().all(|c| !c.read_only), "{loaded:?}");
+    }
+
+    #[test]
+    fn ssl_settings_are_written_only_when_set_and_round_trip() {
+        let t = TempStore::new(None);
+        t.store.append(&plain_dev()).unwrap();
+        let data = t.contents();
+        assert!(!data.contains("ssl"), "{data}");
+        assert_eq!(t.store.load().unwrap()[0].ssl_mode, SslMode::Prefer);
+
+        for (mode, text) in [
+            (SslMode::Disable, "disable"),
+            (SslMode::Require, "require"),
+            (SslMode::VerifyCa, "verify-ca"),
+            (SslMode::VerifyFull, "verify-full"),
+        ] {
+            let t = TempStore::new(None);
+            let conn = Connection {
+                ssl_mode: mode,
+                ssl_key: "~/certs/client.key".into(),
+                ssl_cert: "~/certs/client.pem".into(),
+                ssl_ca: "/etc/ssl/ca.pem".into(),
+                ..plain_dev()
+            };
+            t.store.append(&conn).unwrap();
+            let data = t.contents();
+            assert!(data.contains(&format!("ssl_mode = \"{text}\"")), "{data}");
+            assert!(data.contains("ssl_key = \"~/certs/client.key\""), "{data}");
+            let loaded = t.store.load().unwrap().remove(0);
+            assert_eq!(loaded.ssl_mode, mode);
+            assert_eq!(loaded.ssl_key, "~/certs/client.key");
+            assert_eq!(loaded.ssl_cert, "~/certs/client.pem");
+            assert_eq!(loaded.ssl_ca, "/etc/ssl/ca.pem");
+        }
+    }
+
+    #[test]
+    fn configs_without_ssl_settings_load_with_prefer() {
+        let t = TempStore::new(Some(TWO));
+        let loaded = t.store.load().unwrap();
+        assert!(
+            loaded.iter().all(|c| c.ssl_mode == SslMode::Prefer
+                && c.ssl_key.is_empty()
+                && c.ssl_cert.is_empty()
+                && c.ssl_ca.is_empty()),
+            "{loaded:?}"
+        );
         assert_eq!(t.contents(), TWO);
     }
 
@@ -915,5 +1136,259 @@ password = "s3cret"
         };
         let text = format!("{conn:?}");
         assert!(text.contains("read_only: true"), "{text}");
+    }
+
+    #[test]
+    fn update_adds_and_removes_ssl_settings_in_place() {
+        let t = TempStore::new(Some(PLAIN));
+        let mut conn = Connection {
+            ssl_mode: SslMode::VerifyFull,
+            ssl_ca: "ca.pem".into(),
+            ..plain_dev()
+        };
+        t.store.update("dev", &conn).unwrap();
+        let data = t.contents();
+        assert!(data.contains("ssl_mode = \"verify-full\""), "{data}");
+        assert!(data.contains("ssl_ca = \"ca.pem\""), "{data}");
+        assert!(!data.contains("ssl_key"), "{data}");
+
+        conn.ssl_mode = SslMode::Prefer;
+        conn.ssl_ca.clear();
+        t.store.update("dev", &conn).unwrap();
+        assert_eq!(t.contents(), PLAIN);
+    }
+
+    #[test]
+    fn unknown_ssl_modes_fail_to_load() {
+        let t = TempStore::new(Some(
+            "[[connection]]\nname = \"x\"\nkind = \"postgres\"\n\
+             database = \"x\"\nssl_mode = \"sometimes\"\n",
+        ));
+        let err = t.store.load().unwrap_err();
+        assert!(format!("{err:?}").contains("sometimes"), "{err:?}");
+    }
+
+    #[test]
+    fn debug_output_shows_the_ssl_settings() {
+        let conn = Connection {
+            ssl_mode: SslMode::VerifyCa,
+            ssl_ca: "/etc/ca.pem".into(),
+            ..plain_dev()
+        };
+        let text = format!("{conn:?}");
+        assert!(text.contains("VerifyCa"), "{text}");
+        assert!(text.contains("/etc/ca.pem"), "{text}");
+    }
+
+    #[test]
+    fn a_leading_tilde_expands_to_the_home_directory() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_home("~/certs/ca.pem"), home.join("certs/ca.pem"));
+        assert_eq!(expand_home("/etc/ca.pem"), PathBuf::from("/etc/ca.pem"));
+        assert_eq!(expand_home("~user/ca.pem"), PathBuf::from("~user/ca.pem"));
+    }
+
+    #[test]
+    fn ssl_mode_labels_are_distinct() {
+        let labels: std::collections::HashSet<_> = SslMode::ALL.map(SslMode::label).into();
+        assert_eq!(labels.len(), SslMode::ALL.len());
+        assert!(!SslMode::Disable.uses_tls());
+        assert!(SslMode::ALL[1..].iter().all(|mode| mode.uses_tls()));
+    }
+
+    fn columns(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn place(schema: &str, table: &str) -> (String, String) {
+        (schema.to_string(), table.to_string())
+    }
+
+    fn names(store: &Store) -> Vec<String> {
+        store.load().unwrap().into_iter().map(|c| c.name).collect()
+    }
+
+    #[test]
+    fn row_keys_round_trip_inside_their_connection() {
+        let t = TempStore::new(Some(TWO));
+        assert!(t.store.row_keys().is_empty());
+        let log = columns(&["at", "msg"]);
+        t.store
+            .set_row_key("local", "main", "log", Some(&log))
+            .unwrap();
+        t.store
+            .set_row_key("local", "main", "pairs", Some(&columns(&["a"])))
+            .unwrap();
+        t.store
+            .set_row_key("prod", "public", "log", Some(&columns(&["id"])))
+            .unwrap();
+        t.store
+            .set_row_key("local", "main", "log", Some(&columns(&["msg"])))
+            .unwrap();
+
+        let keys = t.store.row_keys();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys["local"],
+            RowKeys::from([
+                (place("main", "log"), columns(&["msg"])),
+                (place("main", "pairs"), columns(&["a"])),
+            ])
+        );
+        assert_eq!(
+            keys["prod"],
+            RowKeys::from([(place("public", "log"), columns(&["id"]))])
+        );
+        let data = t.contents();
+        assert!(data.contains("[[connection.row_key]]"), "{data}");
+        assert!(data.contains("# production, careful"), "{data}");
+        assert_eq!(names(&t.store), ["local", "prod"], "load ignores row keys");
+    }
+
+    #[test]
+    fn a_row_key_of_the_first_connection_stays_with_it() {
+        let t = TempStore::new(Some(TWO));
+        t.store
+            .set_row_key("local", "main", "log", Some(&columns(&["at"])))
+            .unwrap();
+        let data = t.contents();
+        let key = data.find("[[connection.row_key]]").unwrap();
+        let prod = data.find("name = \"prod\"").unwrap();
+        assert!(key < prod, "written under local, not after prod:\n{data}");
+
+        let doc: DocumentMut = data.parse().unwrap();
+        let tables = doc[CONNECTIONS_KEY].as_array_of_tables().unwrap();
+        assert!(tables.get(0).unwrap().contains_key(ROW_KEY), "{data}");
+        assert!(!tables.get(1).unwrap().contains_key(ROW_KEY), "{data}");
+        assert_eq!(
+            t.store.row_keys().keys().collect::<Vec<_>>(),
+            ["local"],
+            "{data}"
+        );
+    }
+
+    #[test]
+    fn row_keys_follow_a_rename_and_go_with_a_removal() {
+        let t = TempStore::new(Some(TWO));
+        t.store
+            .set_row_key("prod", "public", "log", Some(&columns(&["at"])))
+            .unwrap();
+        t.store
+            .set_row_key("local", "main", "log", Some(&columns(&["id"])))
+            .unwrap();
+        let mut prod = t.store.load().unwrap().remove(1);
+        prod.name = "orders".into();
+        prod.host = "db2.example.com".into();
+        t.store.update("prod", &prod).unwrap();
+        let keys = t.store.row_keys();
+        assert!(!keys.contains_key("prod"));
+        assert_eq!(
+            keys["orders"],
+            RowKeys::from([(place("public", "log"), columns(&["at"]))])
+        );
+        assert_eq!(names(&t.store), ["local", "orders"]);
+
+        assert!(t.store.remove("orders").unwrap());
+        let keys = t.store.row_keys();
+        assert_eq!(keys.keys().collect::<Vec<_>>(), ["local"]);
+        assert!(!t.contents().contains("public"), "{}", t.contents());
+    }
+
+    #[test]
+    fn forgetting_a_row_key_removes_the_entry_and_then_the_list() {
+        let t = TempStore::new(Some(TWO));
+        for table in ["log", "pairs"] {
+            t.store
+                .set_row_key("local", "main", table, Some(&columns(&["a"])))
+                .unwrap();
+        }
+        t.store.set_row_key("local", "main", "log", None).unwrap();
+        assert_eq!(
+            t.store.row_keys()["local"],
+            RowKeys::from([(place("main", "pairs"), columns(&["a"]))])
+        );
+        t.store.set_row_key("local", "main", "pairs", None).unwrap();
+        assert!(t.store.row_keys().is_empty());
+        assert!(!t.contents().contains(ROW_KEY), "{}", t.contents());
+        assert_eq!(names(&t.store), ["local", "prod"]);
+    }
+
+    #[test]
+    fn a_row_key_needs_a_known_connection() {
+        let t = TempStore::new(Some(TWO));
+        let err = t
+            .store
+            .set_row_key("missing", "main", "log", Some(&columns(&["a"])))
+            .unwrap_err();
+        assert!(err.to_string().contains("\"missing\" not found"), "{err}");
+        assert_eq!(t.contents(), TWO);
+    }
+
+    #[test]
+    fn without_a_file_there_are_no_row_keys() {
+        let t = TempStore::new(None);
+        assert!(t.store.row_keys().is_empty());
+        assert!(t.store.set_row_key("local", "main", "log", None).is_err());
+        assert!(!t.store.path.exists());
+    }
+
+    #[test]
+    fn malformed_row_keys_are_skipped() {
+        let t = TempStore::new(Some(
+            r#"[[connection]]
+name = "local"
+kind = "sqlite"
+database = "/tmp/a.db"
+
+[[connection.row_key]]
+schema = "main"
+table = "text"
+columns = "a"
+
+[[connection.row_key]]
+schema = "main"
+table = "empty"
+columns = []
+
+[[connection.row_key]]
+schema = "main"
+columns = ["a"]
+
+[[connection.row_key]]
+schema = "main"
+table = "numbers"
+columns = [1]
+
+[[connection.row_key]]
+schema = "main"
+table = "good"
+columns = ["a", "b"]
+
+[[connection]]
+name = "prod"
+kind = "postgres"
+database = "app"
+row_key = "nonsense"
+"#,
+        ));
+        assert_eq!(names(&t.store), ["local", "prod"]);
+        let keys = t.store.row_keys();
+        assert_eq!(keys.keys().collect::<Vec<_>>(), ["local"]);
+        assert_eq!(
+            keys["local"],
+            RowKeys::from([(place("main", "good"), columns(&["a", "b"]))])
+        );
+        assert!(
+            t.store
+                .set_row_key("prod", "public", "log", Some(&columns(&["a"])))
+                .is_err(),
+            "a row_key that is not a list of tables is left alone"
+        );
+    }
+
+    #[test]
+    fn a_broken_file_has_no_row_keys() {
+        let t = TempStore::new(Some("[[connection]\nname = "));
+        assert!(t.store.row_keys().is_empty());
     }
 }

@@ -9,6 +9,7 @@ use crate::{
         tree,
     },
     db::TableKind,
+    dialog::Dialog,
     keys::Command,
     test_support::{TestConfig, TestWorkspace, snap_png, sqlite_connection},
     workspace::Workspace,
@@ -820,7 +821,7 @@ fn a_click_on_a_value_edits_it_in_place_and_saves_only_what_changed() {
         "a NULL field is empty"
     );
     let update = view(&ws).draft().unwrap().update().unwrap();
-    assert_eq!(update.key, [("id".to_string(), "2".to_string())]);
+    assert_eq!(update.key, [("id".to_string(), Some("2".to_string()))]);
     let changed: Vec<&str> = update.values.iter().map(|(c, _)| c.as_str()).collect();
     assert_eq!(
         changed,
@@ -1015,19 +1016,6 @@ fn values_that_cannot_be_edited_do_not_react() {
     assert!(ws.has_label("Edit name"));
     assert!(!ws.has_label("Edit note"));
 
-    ws.open_table("таблица");
-    ws.press("space");
-    assert!(!ws.has_label("Edit имя"));
-    ws.press("f2");
-    assert!(!has_draft(&ws));
-    assert_eq!(
-        status(&ws),
-        Some((
-            "таблица has no primary key, so its rows can't be edited".to_string(),
-            true
-        ))
-    );
-
     ws.open_table("adults");
     ws.press("f2");
     assert!(!has_draft(&ws));
@@ -1039,6 +1027,451 @@ fn values_that_cannot_be_edited_do_not_react() {
         status(&ws),
         Some(("Rows of a view can't be edited".to_string(), true))
     );
+}
+
+fn words(path: &Path) -> Vec<(Option<String>, Option<String>)> {
+    let db = rusqlite::Connection::open(path).unwrap();
+    let mut statement = db
+        .prepare("SELECT имя, значение FROM таблица ORDER BY rowid")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_table_without_a_key_is_edited_by_its_row_id() {
+    let (_config, path, mut ws) = connect_fixture();
+    let word = |text: &str| Some(text.to_string());
+
+    ws.open_table("таблица");
+    ws.press("down space");
+    assert!(ws.has_label("Edit имя"));
+    ws.press("f2");
+    assert_eq!(focused_field(&ws), Some(0));
+    ws.replace_text("три");
+    ws.press("cmd-s");
+    wait_view(&mut ws, "the save", |v| v.draft().is_none());
+    assert_eq!(status(&ws), Some(("Saved row 2".to_string(), false)));
+    assert_eq!(
+        words(&path),
+        [
+            (word("один"), word("日本語テキスト")),
+            (word("три"), word("ü")),
+            (None, None)
+        ]
+    );
+    wait_view(&mut ws, "the reloaded page", |v| {
+        v.grid
+            .as_ref()
+            .and_then(Grid::page)
+            .is_some_and(|p| p.rows[1][0].as_deref() == Some("три"))
+    });
+
+    ws.click_label("Next row");
+    ws.click_label("Edit значение");
+    ws.type_text("пусто");
+    ws.press("cmd-s");
+    wait_view(&mut ws, "the save", |v| v.draft().is_none());
+    assert_eq!(status(&ws), Some(("Saved row 3".to_string(), false)));
+    assert_eq!(words(&path)[2], (None, word("пусто")), "found by IS NULL");
+    assert_eq!(words(&path)[1], (word("три"), word("ü")));
+}
+
+fn open_row(ws: &mut TestWorkspace) {
+    ws.press("space");
+    wait_view(ws, "the row view", |v| {
+        v.grid.as_ref().is_some_and(Grid::record_open)
+    });
+}
+
+#[test]
+fn the_header_names_how_rows_are_found() {
+    let config = TestConfig::empty();
+    let path = fixture(&config);
+    sql(
+        &path,
+        "CREATE TABLE codes (code TEXT NOT NULL UNIQUE, v TEXT);
+         INSERT INTO codes VALUES ('a', 'x');
+         CREATE TABLE shadow (\"rowid\" TEXT, \"_rowid_\" TEXT, oid TEXT, v TEXT);
+         INSERT INTO shadow VALUES ('1', '2', '3', 'x');",
+    );
+    let mut ws = TestWorkspace::open(&config);
+    ws.connect("fixture");
+    let chip = |ws: &TestWorkspace| ws.text_of("table-row-key");
+
+    ws.open_table("people");
+    assert_eq!(chip(&ws), None, "a primary key needs no chip");
+    open_row(&mut ws);
+    assert!(ws.exists("table-key-0"), "the key icon marks id");
+    assert!(!ws.exists("table-key-1"));
+
+    ws.open_table("таблица");
+    assert_eq!(chip(&ws).as_deref(), Some("key: rowid"));
+    open_row(&mut ws);
+    assert!(
+        !(0..2).any(|i| ws.exists(&format!("table-key-{i}"))),
+        "the row id is not a column"
+    );
+
+    ws.open_table("codes");
+    assert_eq!(chip(&ws).as_deref(), Some("key: code (unique)"));
+    open_row(&mut ws);
+    assert!(ws.exists("table-key-0") && !ws.exists("table-key-1"));
+
+    ws.open_table("adults");
+    assert_eq!(chip(&ws), None, "rows of a view are not edited");
+
+    ws.open_table("shadow");
+    assert_eq!(chip(&ws).as_deref(), Some("no key"));
+    ws.press("f2");
+    assert!(!has_draft(&ws));
+    assert!(picker(&ws).is_some(), "F2 asks for the key columns");
+    ws.press("escape");
+
+    ws.open_table("codes");
+    ws.dispatch(Command::ChooseKey);
+    assert!(picker(&ws).is_none());
+    assert_eq!(
+        status(&ws),
+        Some(("codes already has a key: code (unique)".to_string(), false))
+    );
+    ws.open_table("people");
+    ws.dispatch(Command::ChooseKey);
+    assert_eq!(
+        status(&ws).map(|s| s.0).as_deref(),
+        Some("people already has a key: id (primary)")
+    );
+    ws.open_table("adults");
+    ws.dispatch(Command::ChooseKey);
+    assert!(picker(&ws).is_none());
+    assert_eq!(
+        status(&ws),
+        Some(("Rows of a view can't be edited".to_string(), true))
+    );
+}
+
+fn picker(ws: &TestWorkspace) -> Option<(Vec<String>, Option<usize>, bool)> {
+    match &ws.state().dialog {
+        Some(Dialog::KeyPicker(picker)) => Some(picker.test_state()),
+        _ => None,
+    }
+}
+
+fn shadow_fixture() -> (TestConfig, PathBuf) {
+    let config = TestConfig::empty();
+    let path = fixture(&config);
+    sql(
+        &path,
+        "CREATE TABLE shadow (\"rowid\" TEXT, \"_rowid_\" TEXT, oid TEXT, v TEXT, b BLOB);
+         INSERT INTO shadow VALUES ('1', '2', '3', 'x', NULL), ('a', 'b', 'c', NULL, NULL),
+           ('d', 'd', 'd', 'dup', NULL), ('d', 'd', 'd', 'dup', NULL);",
+    );
+    (config, path)
+}
+
+fn shadows(path: &Path) -> Vec<Vec<Option<String>>> {
+    let db = rusqlite::Connection::open(path).unwrap();
+    let mut statement = db
+        .prepare("SELECT \"rowid\", \"_rowid_\", oid, v FROM shadow")
+        .unwrap();
+    statement
+        .query_map([], |row| (0..4).map(|i| row.get(i)).collect())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+#[test]
+fn a_table_without_any_key_asks_for_key_columns_and_remembers_them() {
+    let (config, path) = shadow_fixture();
+    let before = shadows(&path);
+    let mut ws = TestWorkspace::open(&config);
+    ws.connect("fixture");
+    let chip = |ws: &TestWorkspace| ws.text_of("table-row-key");
+
+    ws.open_table("shadow");
+    ws.press("f2");
+    assert_eq!(
+        picker(&ws),
+        Some((owned(&["rowid", "_rowid_", "oid", "v"]), Some(0), false)),
+        "every comparable column is checked; the blob is not"
+    );
+    assert_eq!(
+        ws.text_of("key-picker-intro").as_deref(),
+        Some(
+            "shadow has no primary key, unique index or row id. Choose the columns that together \
+             identify one row. A change is saved only when exactly one row matches them."
+        )
+    );
+    assert!(!ws.exists("key-picker-forget"), "nothing to forget yet");
+    assert!(!ws.exists("key-picker-stale"));
+    assert!(ws.is_focused("key-picker-cancel"), "{}", ws.describe());
+    ws.press("escape");
+    assert!(picker(&ws).is_none());
+    assert!(!has_draft(&ws));
+    ws.step();
+    assert!(pane_focused(&ws), "{}", ws.describe());
+
+    ws.press("down");
+    open_row(&mut ws);
+    ws.click_label("Edit v");
+    assert_eq!(picker(&ws).map(|p| p.1), Some(Some(3)), "resumes at v");
+    ws.click("key-picker-column-2");
+    ws.click("key-picker-column-4");
+    assert_eq!(
+        picker(&ws).map(|p| p.0),
+        Some(owned(&["rowid", "_rowid_", "v"])),
+        "the blob can't be checked"
+    );
+    ws.click("key-picker-use");
+    assert!(picker(&ws).is_none());
+    assert_eq!(
+        status(&ws),
+        Some((
+            "Rows of shadow are now found by rowid, _rowid_, v".to_string(),
+            false
+        ))
+    );
+    assert_eq!(open_field(&ws), Some(3), "the edit goes on at once");
+    ws.step();
+    assert_eq!(focused_field(&ws), Some(3), "{}", ws.describe());
+    assert!(ws.is_focused("table-field-input-3"), "{}", ws.describe());
+    let update = view(&ws).draft().unwrap().update();
+    assert!(update.is_none());
+    ws.type_text("filled");
+    let key = view(&ws).draft().unwrap().update().unwrap().key;
+    assert_eq!(
+        key,
+        [
+            ("rowid".to_string(), Some("a".to_string())),
+            ("_rowid_".to_string(), Some("b".to_string())),
+            ("v".to_string(), None)
+        ]
+    );
+    ws.press("cmd-s");
+    wait_view(&mut ws, "the save", |v| v.draft().is_none());
+    assert_eq!(status(&ws), Some(("Saved row 2".to_string(), false)));
+    let mut expected = before.clone();
+    expected[1][3] = Some("filled".to_string());
+    assert_eq!(shadows(&path), expected, "exactly one row changed");
+
+    let toml = config.connections_toml();
+    assert!(toml.contains("[[connection.row_key]]"), "{toml}");
+    assert!(toml.contains("table = \"shadow\""), "{toml}");
+    assert_eq!(
+        chip(&ws).as_deref(),
+        Some("key: rowid, _rowid_, v (chosen)")
+    );
+    assert!(
+        ws.exists("table-key-0") && ws.exists("table-key-3") && !ws.exists("table-key-2"),
+        "the chosen columns are marked"
+    );
+
+    ws.click_label("Next row");
+    ws.click_label("Edit v");
+    assert!(picker(&ws).is_none(), "the chosen key is used");
+    ws.replace_text("one");
+    ws.press("cmd-s");
+    wait_view(&mut ws, "the error", |v| {
+        v.draft().is_some_and(|d| d.error.is_some())
+    });
+    assert_eq!(
+        draft_error(&ws).as_deref(),
+        Some(
+            "Not saved: the row's key matches 2 rows (nothing was saved). Cancel the edit, \
+             then choose more key columns to tell these rows apart."
+        )
+    );
+    assert_eq!(shadows(&path), expected, "rolled back");
+
+    ws.click("table-row-key");
+    assert!(picker(&ws).is_none());
+    assert_eq!(
+        status(&ws),
+        Some((
+            "Save or cancel the changes in row 3 first".to_string(),
+            true
+        ))
+    );
+    ws.click_label("Cancel");
+    assert!(!has_draft(&ws));
+    drop(ws);
+
+    let mut ws = TestWorkspace::open(&config);
+    ws.connect("fixture");
+    ws.open_table("shadow");
+    ws.press("f2");
+    assert!(picker(&ws).is_none(), "the choice was remembered");
+    assert!(has_draft(&ws));
+    ws.press("escape escape");
+    assert!(!has_draft(&ws));
+
+    ws.click("table-row-key");
+    assert_eq!(
+        picker(&ws).map(|p| p.0),
+        Some(owned(&["rowid", "_rowid_", "v"])),
+        "the saved choice is checked"
+    );
+    ws.click("key-picker-forget");
+    assert!(picker(&ws).is_none());
+    assert_eq!(
+        status(&ws),
+        Some((
+            "The key columns of shadow were forgotten".to_string(),
+            false
+        ))
+    );
+    assert!(
+        !config.connections_toml().contains("row_key"),
+        "{}",
+        config.connections_toml()
+    );
+    assert_eq!(chip(&ws).as_deref(), Some("no key"));
+    ws.press("f2");
+    assert!(picker(&ws).is_some(), "asks again");
+}
+
+#[test]
+fn a_chosen_column_that_is_gone_asks_again() {
+    let (config, _path) = shadow_fixture();
+    config
+        .store()
+        .set_row_key("fixture", "main", "shadow", Some(&owned(&["gone", "v"])))
+        .unwrap();
+    let mut ws = TestWorkspace::open(&config);
+    ws.connect("fixture");
+    ws.open_table("shadow");
+    assert_eq!(
+        ws.text_of("table-row-key").as_deref(),
+        Some("no key"),
+        "a choice that can't be used is not shown as the key"
+    );
+    ws.press("cmd-shift-k");
+    assert_eq!(
+        picker(&ws),
+        Some((owned(&["v"]), None, true)),
+        "what is left of the choice"
+    );
+    assert!(ws.exists("key-picker-stale"));
+    assert!(ws.exists("key-picker-forget"));
+    ws.press("escape");
+
+    ws.press("f2");
+    assert_eq!(picker(&ws), Some((owned(&["v"]), Some(0), true)));
+    ws.click("key-picker-column-0");
+    ws.click("key-picker-use");
+    assert_eq!(open_field(&ws), Some(0));
+    assert_eq!(
+        ws.text_of("table-row-key").as_deref(),
+        Some("key: rowid, v (chosen)")
+    );
+}
+
+#[test]
+fn the_key_shortcut_is_left_to_a_wider_binding_on_tables_with_a_key() {
+    let (config, _path) = shadow_fixture();
+    let mut ws = TestWorkspace::open(&config);
+    let chord = rune::Chord::parse("mod+shift+k").unwrap();
+    crate::keys::update(|keymap| keymap.set(Command::ShowHelp, 0, chord));
+    let help = |ws: &TestWorkspace| ws.read(|w| matches!(w.dialog, Some(Dialog::Help(_))));
+    ws.connect("fixture");
+
+    ws.open_table("people");
+    ws.press("cmd-shift-k");
+    assert!(help(&ws), "the table has its own key");
+    ws.press("escape");
+    assert!(!ws.has_dialog());
+
+    ws.open_table("shadow");
+    ws.press("cmd-shift-k");
+    assert!(!help(&ws));
+    assert!(picker(&ws).is_some(), "a table without a key takes it");
+    ws.press("escape");
+    crate::keys::update(|keymap| keymap.reset_all());
+}
+
+fn drift(ws: &TestWorkspace) -> (usize, bool, Vec<Option<String>>) {
+    let grid = grid(ws);
+    let ids = grid
+        .page()
+        .map(|page| page.rows.iter().map(|row| row[0].clone()).collect())
+        .unwrap_or_default();
+    (grid.row(), grid.record_open(), ids)
+}
+
+#[test]
+fn the_row_view_follows_a_saved_row_that_moved_and_closes_when_it_left() {
+    let (config, _path) = shadow_fixture();
+    let path = config.dir().join("data").join("fixture.db");
+    sql(
+        &path,
+        "CREATE TABLE drift (\"rowid\" TEXT, \"_rowid_\" TEXT, oid TEXT, v TEXT);
+         INSERT INTO drift VALUES ('1', '1', '1', 'a'), ('2', '2', '2', 'b'), ('3', '3', '3', 'c');
+         CREATE TRIGGER drift_moves AFTER UPDATE OF v ON drift WHEN NEW.v = 'moved' BEGIN
+           DELETE FROM drift WHERE \"rowid\" = NEW.\"rowid\";
+           INSERT INTO drift VALUES (NEW.\"rowid\", NEW.\"_rowid_\", NEW.oid, NEW.v);
+         END;
+         CREATE TRIGGER drift_goes AFTER UPDATE OF v ON drift WHEN NEW.v = 'gone' BEGIN
+           DELETE FROM drift WHERE \"rowid\" = NEW.\"rowid\";
+         END;",
+    );
+    config
+        .store()
+        .set_row_key("fixture", "main", "drift", Some(&owned(&["rowid"])))
+        .unwrap();
+    let id = |text: &str| Some(text.to_string());
+    let mut ws = TestWorkspace::open(&config);
+    ws.connect("fixture");
+    ws.open_table("drift");
+    open_row(&mut ws);
+    ws.click_label("Edit v");
+    ws.replace_text("moved");
+    ws.press("cmd-s");
+    wait_view(&mut ws, "the save", |v| v.draft().is_none());
+    wait_view(&mut ws, "the moved row", |v| {
+        v.grid
+            .as_ref()
+            .and_then(Grid::page)
+            .is_some_and(|p| p.rows[2][3].as_deref() == Some("moved"))
+    });
+    assert_eq!(
+        drift(&ws),
+        (2, true, vec![id("2"), id("3"), id("1")]),
+        "the row view went with the row"
+    );
+    assert_eq!(footer(&ws), "row 3");
+    assert_eq!(selected_cell(&ws).map(|cell| cell.0), Some(2));
+    assert_eq!(status(&ws), Some(("Saved row 1".to_string(), false)));
+    assert!(view(&ws).follow.is_none());
+
+    ws.click_label("Edit v");
+    ws.replace_text("gone");
+    ws.press("cmd-s");
+    wait_view(&mut ws, "the save", |v| v.draft().is_none());
+    wait_view(&mut ws, "the row left", |v| {
+        v.grid
+            .as_ref()
+            .and_then(Grid::page)
+            .is_some_and(|p| p.rows.len() == 2)
+    });
+    assert_eq!(drift(&ws), (1, false, vec![id("2"), id("3")]));
+    assert_eq!(
+        status(&ws),
+        Some((
+            "Saved row 3; it is no longer on this page".to_string(),
+            false
+        ))
+    );
+    ws.step();
+    assert!(grid_focused(&ws), "{}", ws.describe());
+    assert!(!view(&ws).reveal_grid);
 }
 
 #[test]

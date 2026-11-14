@@ -588,7 +588,7 @@ fn a_row_update_reads_as_the_sql_that_saves_it() {
     let update = RowUpdate {
         schema: "main".into(),
         table: "customers".into(),
-        key: vec![("id".into(), "2".into())],
+        key: vec![("id".into(), Some("2".into()))],
         values: vec![
             ("name".into(), Some("O'Brien".into())),
             ("email".into(), None),
@@ -607,6 +607,29 @@ fn a_row_update_reads_as_the_sql_that_saves_it() {
             .unwrap()
             .text
             .starts_with("UPDATE `main`.`customers` SET `name`"),
+    );
+
+    let mut nullable = update.clone();
+    nullable.key.push(("note".into(), None));
+    assert_eq!(
+        row_update(DbKind::Postgres, &nullable).unwrap().text,
+        "UPDATE \"main\".\"customers\" SET \"name\" = 'O''Brien', \"email\" = NULL \
+         WHERE \"id\" = '2' AND \"note\" IS NULL"
+    );
+
+    let by_place = RowUpdate {
+        table: "t".into(),
+        key: [("tableoid", "16385"), ("ctid", "(0,3)"), ("xmin", "742")]
+            .iter()
+            .map(|(c, v)| (c.to_string(), Some(v.to_string())))
+            .collect(),
+        values: vec![("v".into(), None)],
+        ..update.clone()
+    };
+    assert_eq!(
+        row_update(DbKind::Postgres, &by_place).unwrap().text,
+        "UPDATE \"main\".\"t\" SET \"v\" = NULL \
+         WHERE \"tableoid\" = '16385' AND \"ctid\" = '(0,3)' AND \"xmin\" = '742'"
     );
 
     let bare = RowUpdate {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use rune::PointerPress;
 
 use crate::{
-    connection::{self, Connection, Store},
+    connection::{self, Connection, RowKeys, Store},
     db,
 };
 
@@ -48,6 +48,7 @@ pub struct Home {
     selected: Option<usize>,
     pub focus: Focus,
     pub drafts: HashMap<String, String>,
+    pub row_keys: HashMap<String, RowKeys>,
     pub status: Option<String>,
     pub error: Option<Failure>,
     pub menu: Option<PointerPress>,
@@ -55,12 +56,14 @@ pub struct Home {
 
 impl Home {
     pub fn new(store: Store, connections: Vec<Connection>) -> Self {
+        let row_keys = store.row_keys();
         let mut home = Self {
             store,
             connections: Vec::new(),
             selected: None,
             focus: Focus::NewButton,
             drafts: HashMap::new(),
+            row_keys,
             status: None,
             error: None,
             menu: None,
@@ -83,6 +86,7 @@ impl Home {
     pub fn reload(&mut self) -> Result<(), String> {
         let connections = self.store.load().map_err(|err| format!("{err:#}"))?;
         self.set_connections(connections);
+        self.row_keys = self.store.row_keys();
         Ok(())
     }
 
@@ -250,8 +254,34 @@ impl Home {
         if renamed && let Some(draft) = self.drafts.remove(&original.name) {
             self.drafts.insert(conn.name.clone(), draft);
         }
+        self.row_keys = self.store.row_keys();
         self.connections[index] = conn;
         Ok((index, status))
+    }
+
+    pub fn save_row_key(
+        &mut self,
+        connection: &str,
+        schema: &str,
+        table: &str,
+        columns: Option<Vec<String>>,
+    ) -> Result<(), String> {
+        let place = (schema.to_string(), table.to_string());
+        let keys = self.row_keys.entry(connection.to_string()).or_default();
+        match &columns {
+            Some(columns) => {
+                keys.insert(place, columns.clone());
+            }
+            None => {
+                keys.remove(&place);
+            }
+        }
+        if keys.is_empty() {
+            self.row_keys.remove(connection);
+        }
+        self.store
+            .set_row_key(connection, schema, table, columns.as_deref())
+            .map_err(|err| format!("{err:#}"))
     }
 
     pub fn delete_connection(&mut self, name: &str) {
@@ -266,6 +296,7 @@ impl Home {
             .is_some_and(Connection::uses_keychain);
         self.connections.retain(|c| c.name != name);
         self.drafts.remove(name);
+        self.row_keys = self.store.row_keys();
         let mut status = format!("Connection \"{name}\" deleted");
         if had_keychain && let Err(err) = connection::delete_password(name) {
             status.push_str(&format!(", but its keychain password was not: {err}"));
@@ -366,7 +397,7 @@ mod tests {
         Focus, Home, Original, StatusKind, active_after_close, cycle_tab, tab_at_position,
         tab_shortcut, tab_title,
     };
-    use crate::connection::{Connection, DbKind, PasswordStorage, Store};
+    use crate::connection::{Connection, DbKind, PasswordStorage, SslMode, Store};
 
     fn home_from(dir: &Path, toml: &str) -> Home {
         let config = dir.join("connections.toml");
@@ -399,6 +430,10 @@ mod tests {
             database: database.to_string(),
             password_storage: PasswordStorage::Keychain,
             password: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         }
     }
 
@@ -568,6 +603,49 @@ mod tests {
     }
 
     #[test]
+    fn row_keys_are_saved_and_follow_a_renamed_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut home = home_from(
+            dir.path(),
+            "[[connection]]\nname = \"local\"\nkind = \"sqlite\"\ndatabase = \"1.db\"\n\n\
+             [[connection.row_key]]\nschema = \"main\"\ntable = \"log\"\ncolumns = [\"at\"]\n",
+        );
+        let place = |table: &str| ("main".to_string(), table.to_string());
+        let at = vec!["at".to_string()];
+        assert_eq!(home.row_keys["local"][&place("log")], at, "loaded at start");
+
+        let ab = vec!["a".to_string(), "b".to_string()];
+        home.save_row_key("local", "main", "pairs", Some(ab.clone()))
+            .unwrap();
+        assert_eq!(home.row_keys["local"][&place("pairs")], ab);
+        let stored = Store::at(dir.path().join("connections.toml")).row_keys();
+        assert_eq!(stored, home.row_keys);
+
+        let original = Original {
+            name: "local".into(),
+            password: String::new(),
+        };
+        home.save_edit(&original, sqlite("renamed", "1.db"), "")
+            .unwrap();
+        assert!(!home.row_keys.contains_key("local"));
+        assert_eq!(home.row_keys["renamed"].len(), 2);
+
+        home.save_row_key("renamed", "main", "log", None).unwrap();
+        home.save_row_key("renamed", "main", "pairs", None).unwrap();
+        assert!(home.row_keys.is_empty(), "{:?}", home.row_keys);
+        home.save_row_key("renamed", "main", "log", Some(at))
+            .unwrap();
+        home.delete_connection("renamed");
+        assert!(home.row_keys.is_empty());
+
+        assert_eq!(
+            home.save_row_key("gone", "main", "log", None)
+                .map_err(|e| e.contains("not found")),
+            Err(true)
+        );
+    }
+
+    #[test]
     fn a_new_connection_can_keep_its_password_in_plain_text() {
         let dir = tempfile::tempdir().unwrap();
         let mut home = home_from(dir.path(), "");
@@ -582,6 +660,10 @@ mod tests {
             database: "app".into(),
             password_storage: PasswordStorage::Plain,
             password: "s3cret".into(),
+            ssl_mode: SslMode::default(),
+            ssl_key: String::new(),
+            ssl_cert: String::new(),
+            ssl_ca: String::new(),
         };
         let (index, status) = home.save_new(conn, "s3cret").unwrap();
         assert_eq!((index, status.as_str()), (0, "Connection \"dev\" saved"));

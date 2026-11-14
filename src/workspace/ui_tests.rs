@@ -3,7 +3,7 @@ use std::{path::Path, rc::Rc};
 use super::{Focus, TabState, Workspace};
 use crate::{
     browser::Browser,
-    connection::{Connection, DbKind, PasswordStorage, Store, Tag},
+    connection::{Connection, DbKind, PasswordStorage, SslMode, Store, Tag},
     dialog::Dialog,
     form::{ConnectionForm, FormValues},
     keys::Command,
@@ -153,6 +153,10 @@ fn postgres_plain(name: &str) -> Connection {
         database: "orders".into(),
         password_storage: PasswordStorage::Plain,
         password: "pw".into(),
+        ssl_mode: SslMode::default(),
+        ssl_key: String::new(),
+        ssl_cert: String::new(),
+        ssl_ca: String::new(),
     }
 }
 
@@ -602,6 +606,52 @@ fn the_draft_follows_a_renamed_connection() {
 
     ws.connect("renamed");
     assert_eq!(ws.console().text(), "SELECT 2 AS two");
+}
+
+#[test]
+fn row_keys_follow_a_renamed_connection_and_go_with_a_deleted_one() {
+    let config = TestConfig::with_sample_dbs(&["shop", "library"]);
+    let columns = vec!["at".to_string(), "msg".to_string()];
+    config
+        .store()
+        .set_row_key("shop", "main", "log", Some(&columns))
+        .unwrap();
+    let mut ws = TestWorkspace::open(&config);
+    let place = ("main".to_string(), "log".to_string());
+
+    ws.connect("shop");
+    assert_eq!(ws.browser().row_keys.get(&place), Some(&columns));
+    ws.press("cmd-w");
+    ws.connect("library");
+    assert!(ws.browser().row_keys.is_empty());
+    ws.press("cmd-w");
+
+    click_row(&mut ws, 0);
+    ws.press("cmd-e");
+    ws.replace_text("renamed");
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    assert_eq!(names(&ws), ["renamed", "library"]);
+    let keys = config.store().row_keys();
+    assert_eq!(
+        keys.keys().collect::<Vec<_>>(),
+        ["renamed"],
+        "{}",
+        config.connections_toml()
+    );
+    assert_eq!(ws.read(|w| w.home.row_keys.clone()), keys);
+
+    click_row(&mut ws, 0);
+    ws.press("cmd-backspace");
+    click_dialog_delete(&mut ws);
+    wait_dialog_closed(&mut ws);
+    assert_eq!(names(&ws), ["library"]);
+    assert!(
+        !config.connections_toml().contains("row_key"),
+        "{}",
+        config.connections_toml()
+    );
+    assert!(ws.read(|w| w.home.row_keys.is_empty()));
 }
 
 #[test]
@@ -1280,6 +1330,116 @@ fn browse_fills_the_sqlite_path() {
         focused_field(&ws),
         Some("name"),
         "Browse… keeps the field focus"
+    );
+}
+
+fn tls_fixture(name: &str) -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/db/fixtures")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn shows_ssl_files(ws: &TestWorkspace) -> [bool; 3] {
+    ["form-ssl-key", "form-ssl-cert", "form-ssl-ca"].map(|key| ws.exists(key))
+}
+
+#[test]
+fn ssl_settings_follow_the_mode_and_are_saved() {
+    let config = TestConfig::empty();
+    let ca = tls_fixture("ca.pem");
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-n");
+    ws.type_text("secure");
+    ws.update(|w, _| form_mut(w).set_storage(PasswordStorage::Plain));
+    assert_eq!(values(&ws).ssl_mode, SslMode::Prefer);
+    assert!(ws.exists("form-ssl"));
+    assert_eq!(shows_ssl_files(&ws), [true; 3]);
+
+    ws.click("form-ssl-trigger");
+    assert!(ws.read(|w| form_of(w).ssl_open), "the menu opens");
+    ws.click_in("form-ssl-content", "Disable");
+    assert_eq!(values(&ws).ssl_mode, SslMode::Disable);
+    assert!(
+        ws.read(|w| !form_of(w).ssl_open),
+        "choosing closes the menu"
+    );
+    assert_eq!(shows_ssl_files(&ws), [false; 3]);
+
+    ws.click("form-ssl-trigger");
+    ws.click_in("form-ssl-content", "Verify Full");
+    assert_eq!(values(&ws).ssl_mode, SslMode::VerifyFull);
+    assert_eq!(shows_ssl_files(&ws), [true; 3]);
+    ws.click("browse-ssl-ca");
+    assert!(ws.rt.file_dialog().is_some(), "Browse… asks for a file");
+    ws.rt.resolve_file_dialog(Some(ca.clone().into())).unwrap();
+    ws.settle();
+    assert_eq!(values(&ws).ssl_ca, ca);
+    assert_eq!(
+        focused_field(&ws),
+        Some("name"),
+        "Browse… keeps the field focus"
+    );
+
+    set_text(&mut ws, "ssl_key", &tls_fixture("client.key"));
+    focus_field(&mut ws, "name");
+    ws.press("enter");
+    assert_eq!(
+        form_error(&ws).as_deref(),
+        Some("SSL cert is required with an SSL key")
+    );
+    set_text(&mut ws, "ssl_key", "");
+
+    set_kind(&mut ws, DbKind::Sqlite);
+    assert!(!ws.exists("form-ssl"));
+    assert_eq!(shows_ssl_files(&ws), [false; 3]);
+    set_kind(&mut ws, DbKind::Postgres);
+    assert_eq!(values(&ws).ssl_ca, ca, "the path survives a type change");
+
+    focus_field(&mut ws, "name");
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    let toml = config.connections_toml();
+    assert!(toml.contains("ssl_mode = \"verify-full\""), "{toml}");
+    assert!(toml.contains(&format!("ssl_ca = \"{ca}\"")), "{toml}");
+    assert!(!toml.contains("ssl_key"), "{toml}");
+    assert!(says(&ws, "details-fields", "Verify Full"));
+
+    ws.press("cmd-e");
+    let v = values(&ws);
+    assert_eq!(
+        (v.ssl_mode, v.ssl_ca.as_str()),
+        (SslMode::VerifyFull, ca.as_str())
+    );
+    assert_eq!(shows_ssl_files(&ws), [true; 3]);
+}
+
+#[test]
+fn a_connection_url_fills_in_the_ssl_settings() {
+    let config = TestConfig::empty();
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-n");
+    focus_field(&mut ws, "url");
+    ws.type_text("postgres://app@db/orders?sslmode=verify-ca&sslrootcert=/certs/ca.pem");
+    let v = values(&ws);
+    assert_eq!(v.ssl_mode, SslMode::VerifyCa);
+    assert_eq!(v.ssl_ca, "/certs/ca.pem");
+    ws.replace_text("mysql://root@db/shop?ssl-mode=DISABLED");
+    let v = values(&ws);
+    assert_eq!((v.kind, v.ssl_mode), (DbKind::MySql, SslMode::Disable));
+    assert_eq!(v.ssl_ca, "");
+    assert_eq!(shows_ssl_files(&ws), [false; 3]);
+    ws.replace_text("postgres://db/app?sslmode=sometimes");
+    focus_field(&mut ws, "name");
+    ws.type_text("bad");
+    ws.press("enter");
+    assert_eq!(
+        form_error(&ws).as_deref(),
+        Some(
+            "Invalid connection URL: unsupported sslmode \"sometimes\", expected disable, \
+             allow, prefer, require, verify-ca or verify-full"
+        )
     );
 }
 

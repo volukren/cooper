@@ -1,6 +1,7 @@
 pub(crate) mod edit;
 pub mod format;
 pub(crate) mod grid;
+pub(crate) mod key_picker;
 
 #[cfg(test)]
 mod ui_tests;
@@ -17,7 +18,8 @@ use super::{
     confirm::{Confirm, Pending},
 };
 use crate::{
-    db::{self, ColumnDef, ColumnInfo, Page, RowUpdate, TableDdl, TableKind},
+    connection::RowKeys,
+    db::{self, ColumnDef, ColumnInfo, KeySource, Page, RowUpdate, TableDdl, TableKind},
     dialog::Dialog,
     guard, icons,
     keys::{self, Command, Ctx},
@@ -29,7 +31,7 @@ use crate::{
 use self::{
     edit::{Draft, Exact},
     format::{
-        CUT_NOTE, MAX_LABEL_WIDTH, NULL, cell_copy_text, copied, definition, full_value,
+        CUT_NOTE, MAX_LABEL_WIDTH, NULL, cell_copy_text, copied, definition, full_value, key_chip,
         kind_label, normalize, page_footer, record_footer, row_copy_text,
     },
     grid::{COUNTING_HINT, DataGrid, Grid, GridData, GridSpec, Move, Notice, PageArrival, Update},
@@ -39,6 +41,7 @@ const KEY: &str = "table-view";
 pub const PREFIX: &str = "table";
 pub const RECORD_SCROLL: &str = "table-record-scroll";
 const LINE_STEP: f32 = 24.0;
+const KEY_ICON: f32 = 12.0;
 
 pub struct TableView {
     pub grid: Option<Grid>,
@@ -51,6 +54,8 @@ pub struct TableView {
     pub grid_offset: Option<[f32; 2]>,
     pub keyed: bool,
     pub detached: bool,
+    pub follow: Option<(usize, edit::Follow)>,
+    pub reveal_grid: bool,
 }
 
 impl TableView {
@@ -66,6 +71,8 @@ impl TableView {
             grid_offset: None,
             keyed: false,
             detached: false,
+            follow: None,
+            reveal_grid: false,
         }
     }
 
@@ -218,6 +225,7 @@ pub fn open(b: &mut Browser, schema: &str, table: &str, kind: TableKind) {
     }
     b.table.grid = Some(Grid::open(schema, table, kind, &*b.session));
     b.table.draft = None;
+    b.table.follow = None;
     b.table.counting_hint_shown = false;
     b.table.record_scroll.reset();
     b.table.cells.cell = None;
@@ -238,16 +246,50 @@ pub fn on_page(b: &mut Browser, id: u64, page: Page) -> bool {
     let Some(grid) = &mut b.table.grid else {
         return false;
     };
+    let before = (grid.row(), grid.record_open());
     let arrival = grid.on_page(id, page, &*b.session);
     if arrival == PageArrival::Stale {
         return false;
     }
+    let follow = b
+        .table
+        .follow
+        .take()
+        .filter(|(row, _)| arrival == PageArrival::Refreshed && before == (*row, true));
     if arrival == PageArrival::Moved {
         b.table.record_scroll.reset();
     }
+    let lost = follow.and_then(|(row, values)| follow_row(b, row, &values));
     settle_draft(b);
     sync_table(b, arrival == PageArrival::Moved);
+    if let Some(row) = lost {
+        status(
+            b,
+            format!("Saved {row}; it is no longer on this page"),
+            false,
+        );
+    }
     true
+}
+
+fn follow_row(b: &mut Browser, row: usize, follow: &edit::Follow) -> Option<String> {
+    let grid = b.table.grid.as_mut().filter(|grid| grid.record_open())?;
+    let page = grid.page()?;
+    let found = edit::find_row(page, follow);
+    let label = record_footer(page.offset, row);
+    match found {
+        Some(found) => {
+            if found != row {
+                grid.set_row(found);
+            }
+            None
+        }
+        None => {
+            grid.close_record();
+            b.table.reveal_grid = true;
+            Some(label)
+        }
+    }
 }
 
 fn settle_draft(b: &mut Browser) {
@@ -259,8 +301,13 @@ fn settle_draft(b: &mut Browser) {
             && grid.error().is_none()
             && grid.row() == draft.row()
             && grid.page().is_some_and(|page| {
-                edit::target(page, draft.row(), grid.kind())
-                    .is_ok_and(|target| target.key == draft.target().key)
+                edit::target(
+                    page,
+                    draft.row(),
+                    grid.kind(),
+                    chosen_key(&b.row_keys, grid),
+                )
+                .is_ok_and(|target| target.key == draft.target().key)
             })
     });
     if shown {
@@ -322,7 +369,15 @@ pub fn on_row_updated(b: &mut Browser, id: u64) -> bool {
         return false;
     }
     let (_, row) = b.table.save_request.take().unwrap_or_default();
-    if b.table.draft.as_ref().is_some_and(|draft| draft.saving) {
+    let ctid = b
+        .table
+        .grid
+        .as_ref()
+        .and_then(Grid::page)
+        .is_some_and(|page| page.key.source == KeySource::Ctid);
+    if let Some(draft) = b.table.draft.as_ref().filter(|draft| draft.saving) {
+        let unordered = ctid || draft.target().chosen;
+        b.table.follow = unordered.then(|| (draft.row(), draft.follow()));
         drop_draft(b);
     }
     if let Some(grid) = &mut b.table.grid {
@@ -337,7 +392,7 @@ fn on_save_failed(b: &mut Browser, message: &str) {
     match b.table.draft.as_mut().filter(|draft| draft.saving) {
         Some(draft) => {
             draft.saving = false;
-            draft.error = Some(format!("Not saved: {message}"));
+            draft.error = Some(draft.target().save_error(message));
         }
         None => status(b, format!("Failed to save {row}: {message}"), true),
     }
@@ -347,6 +402,14 @@ pub fn poll(b: &mut Browser, tx: &mut Tx) -> bool {
     let mut changed = false;
     if std::mem::take(&mut b.table.refocus) {
         tx.focus(KEY, false);
+        changed = true;
+    }
+    if std::mem::take(&mut b.table.reveal_grid) {
+        let from = b.table.grid_offset.take().unwrap_or_default();
+        if b.table.grid_shown() {
+            b.table.cells.to_selection = false;
+            b.table.cells.reveal_from(PREFIX, from, tx);
+        }
         changed = true;
     }
     if std::mem::take(&mut b.table.cells.to_left) {
@@ -458,18 +521,30 @@ fn note_press(b: &mut Browser, tx: &mut Tx) {
     collapse_field(b, tx);
 }
 
-fn edit_value(b: &mut Browser, column: Option<usize>, fallback: bool, tx: &mut Tx) {
+fn chosen_key<'a>(row_keys: &'a RowKeys, grid: &Grid) -> Option<&'a [String]> {
+    row_keys
+        .get(&(grid.schema().to_string(), grid.table().to_string()))
+        .map(Vec::as_slice)
+}
+
+enum Begin {
+    Done,
+    ChooseKey { column: usize, stale: bool },
+}
+
+fn edit_value(b: &mut Browser, column: Option<usize>, fallback: bool, tx: &mut Tx) -> Begin {
     if b.connection.read_only {
-        return status(b, super::READ_ONLY_EDIT, false);
+        status(b, super::READ_ONLY_EDIT, false);
+        return Begin::Done;
     }
     let Some(grid) = &b.table.grid else {
-        return;
+        return Begin::Done;
     };
     let Some(page) = grid.page().filter(|page| !page.rows.is_empty()) else {
-        return;
+        return Begin::Done;
     };
     if grid.error().is_some() {
-        return;
+        return Begin::Done;
     }
     let row = grid.row();
     if b.table
@@ -478,18 +553,28 @@ fn edit_value(b: &mut Browser, column: Option<usize>, fallback: bool, tx: &mut T
         .is_none_or(|draft| draft.row() != row)
     {
         if b.table.save_request.is_some() {
-            return status(b, "Still saving the last change…", false);
+            status(b, "Still saving the last change…", false);
+            return Begin::Done;
         }
-        match edit::target(page, row, grid.kind()) {
+        match edit::target(page, row, grid.kind(), chosen_key(&b.row_keys, grid)) {
             Ok(target) => b.table.draft = Some(Draft::new(target, row)),
-            Err(reason) => return status(b, reason, true),
+            Err(edit::Refusal::Reason(reason)) => {
+                status(b, reason, true);
+                return Begin::Done;
+            }
+            Err(edit::Refusal::ChooseKey { stale }) => {
+                return Begin::ChooseKey {
+                    column: column.unwrap_or(0),
+                    stale,
+                };
+            }
         }
     }
     if !b.table.record_open() {
         open_record(b, tx);
     }
     let Some(draft) = &mut b.table.draft else {
-        return;
+        return Begin::Done;
     };
     let wanted = column.unwrap_or(0);
     let index = if draft.editable(wanted) {
@@ -508,19 +593,25 @@ fn edit_value(b: &mut Browser, column: Option<usize>, fallback: bool, tx: &mut T
         if draft.changes() == 0 && draft.focused().is_none() {
             b.table.draft = None;
         }
-        return status(
+        status(
             b,
             note.unwrap_or("No value of this row can be edited"),
             false,
         );
+        return Begin::Done;
     };
     draft.open(index);
     tx.scroll_into_view_in(RECORD_SCROLL, format!("table-field-{index}"));
+    Begin::Done
 }
 
-fn edit_selected(b: &mut Browser, tx: &mut Tx) {
-    let column = b.table.cells.cell.and_then(|(_, col)| col);
-    edit_value(b, column, true, tx);
+fn begin_edit(s: &mut Workspace, tab: TabId, column: Option<usize>, fallback: bool, tx: &mut Tx) {
+    let Some(b) = s.browser_mut(tab) else {
+        return;
+    };
+    if let Begin::ChooseKey { column, stale } = edit_value(b, column, fallback, tx) {
+        key_picker::open(s, tab, Some(column), stale);
+    }
 }
 
 fn on_draft_change(b: &mut Browser, index: usize) {
@@ -754,7 +845,15 @@ pub fn run(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
             copy(b, column, tx);
         }
         CopyRow => copy(b, None, tx),
-        EditRow => edit_selected(b, tx),
+        EditRow => {
+            let column = b.table.cells.cell.and_then(|(_, col)| col);
+            begin_edit(s, tab, column, true, tx);
+        }
+        ChooseKey => {
+            if typing || !key_picker::open(s, tab, None, false) {
+                return false;
+            }
+        }
         SaveRow => {
             if b.table.draft.is_none() {
                 return false;
@@ -962,11 +1061,46 @@ fn title_view(b: &Browser, grid: &Grid, t: &Theme) -> El {
         }))
 }
 
+fn row_key_chip(b: &Browser, grid: &Grid, t: &Theme) -> Option<El> {
+    if grid.kind() != TableKind::Table {
+        return None;
+    }
+    let page = grid.page()?;
+    let chosen = chosen_key(&b.row_keys, grid).filter(|chosen| edit::usable_key(page, chosen));
+    let (label, help) = key_chip(&page.key, chosen)?;
+    let chip = row()
+        .key("table-row-key")
+        .px(4.0)
+        .mr(4.0)
+        .radius(3.0)
+        .border(1.0, t.border)
+        .min_w(0.0)
+        .shrink()
+        .label(label.clone())
+        .help(help)
+        .child(ui::label(label, t.text_xs, t.muted).truncate().min_w(0.0));
+    if page.key.source != KeySource::None {
+        return Some(chip);
+    }
+    let tab = b.id;
+    Some(
+        chip.cursor(Cursor::Pointer)
+            .hover(t.table_hover)
+            .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                if let Some(b) = s.browser_mut(tab) {
+                    note_press(b, tx);
+                }
+                key_picker::open(s, tab, None, false);
+            }),
+    )
+}
+
 fn header_extra(b: &Browser, grid: &Grid, t: &Theme) -> El {
     let tab = b.id;
     row()
         .gap(4.0)
         .center_y()
+        .children(row_key_chip(b, grid, t))
         .children(grid.is_loading().then(|| {
             row()
                 .key("table-loading")
@@ -1038,13 +1172,18 @@ fn error_view(b: &Browser, error: &str, t: &Theme) -> El {
         )
 }
 
-fn label_width(columns: &[ColumnInfo], defs: &[ColumnDef], t: &Theme) -> f32 {
+fn label_width(columns: &[ColumnInfo], defs: &[ColumnDef], key: &[String], t: &Theme) -> f32 {
     let digit = grid::mono_cell_width(t);
     let mark = ui::text_width("•", t.mono) + 4.0;
     let widest = columns
         .iter()
         .map(|column| {
-            (ui::text_width(&column.name, t.bold(t.mono)) + mark)
+            let icon = if key.contains(&column.name) {
+                KEY_ICON + 4.0
+            } else {
+                0.0
+            };
+            (icon + ui::text_width(&column.name, t.bold(t.mono)) + mark)
                 .max(ui::text_width(&normalize(definition(defs, column)), t.mono))
         })
         .fold(digit, f32::max);
@@ -1054,7 +1193,13 @@ fn label_width(columns: &[ColumnInfo], defs: &[ColumnDef], t: &Theme) -> f32 {
 fn record_view(b: &Browser, grid: &Grid, page: &Page, t: &Theme) -> El {
     let tab = b.id;
     let defs = grid.ddl().map_or(&[][..], |ddl| ddl.columns.as_slice());
-    let label_w = label_width(&page.columns, defs, t);
+    let key_columns = match chosen_key(&b.row_keys, grid) {
+        Some(chosen) if page.key.source == KeySource::None && edit::usable_key(page, chosen) => {
+            chosen
+        }
+        _ => page.key.columns.as_slice(),
+    };
+    let label_w = label_width(&page.columns, defs, key_columns, t);
     let row_index = grid.row();
     let draft = b
         .table
@@ -1062,7 +1207,7 @@ fn record_view(b: &Browser, grid: &Grid, page: &Page, t: &Theme) -> El {
         .as_ref()
         .filter(|draft| draft.row() == row_index);
     let saving = draft.is_some_and(|draft| draft.saving);
-    let keyed = !page.primary_key.is_empty();
+    let editable_table = grid.kind() == TableKind::Table;
     let fields = page.columns.iter().enumerate().map(|(index, column)| {
         let def = definition(defs, column);
         let cut = page
@@ -1074,13 +1219,20 @@ fn record_view(b: &Browser, grid: &Grid, page: &Page, t: &Theme) -> El {
             .and_then(|draft| draft.field(index));
         let kept = draft.and_then(|draft| draft.value(index));
         let changed = draft.is_some_and(|draft| draft.changed(index));
-        let editable = keyed
+        let editable = editable_table
             && !b.connection.read_only
             && matches!(edit::exact(page, row_index, index), Exact::Value(_));
         let name_color = if changed { t.blue } else { t.foreground };
+        let key_field = key_columns.contains(&column.name);
         let name = row()
             .gap(4.0)
             .min_w(0.0)
+            .center_y()
+            .children(key_field.then(|| {
+                ui::icon_el(&icons::KEY_ROUND, KEY_ICON, t.muted)
+                    .key(format!("table-key-{index}"))
+                    .help("Part of the row's key")
+            }))
             .child(
                 text(column.name.clone())
                     .font(t.bold(t.mono))
@@ -1130,9 +1282,12 @@ fn record_view(b: &Browser, grid: &Grid, page: &Page, t: &Theme) -> El {
                         .label(format!("Edit {}", column.name))
                         .cursor(Cursor::Text)
                         .hover(t.table_hover)
-                        .on_press_tx(with_browser(tab, move |b, tx| {
-                            edit_value(b, Some(index), false, tx)
-                        }));
+                        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                            if let Some(b) = s.browser_mut(tab) {
+                                note_press(b, tx);
+                            }
+                            begin_edit(s, tab, Some(index), false, tx);
+                        });
                 }
                 value
             }

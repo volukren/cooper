@@ -15,7 +15,7 @@ use rune::{Cx, El, Key, KeyEvent, Mods, ScrollPos, Tx, Waker, col, el, row, text
 use rune_kit::{Button, ButtonVariant, ControlSize};
 
 use crate::{
-    connection::Connection,
+    connection::{Connection, RowKeys},
     db::{self, Response, Session},
     dialog::Dialog,
     icons,
@@ -137,6 +137,7 @@ pub struct Browser {
     pub sidebar: Split,
     pub drains: usize,
     pub scrolls: Scrolls,
+    pub row_keys: RowKeys,
     status_gen: u64,
     status_seen: u64,
     fields_seen: Option<Fields>,
@@ -161,6 +162,7 @@ impl Browser {
             sidebar: Split::new(280.0, 180.0, 560.0),
             drains: 0,
             scrolls: Scrolls::default(),
+            row_keys: RowKeys::new(),
             status_gen: 0,
             status_seen: 0,
             fields_seen: None,
@@ -400,8 +402,8 @@ fn dispatch(s: &mut Workspace, tab: TabId, cmd: Command, tx: &mut Tx) -> bool {
         CancelScript => console::cancel(b),
         ShowDdl => tree::run(s, tab, cmd, tx),
         RunScript | FocusResult | FocusEditor => console::run(s, tab, cmd, tx),
-        NextPage | PrevPage | FirstPage | LastPage | EditRow | SaveRow | CancelEdit | NextField
-        | PrevField => table::run(s, tab, cmd, tx),
+        NextPage | PrevPage | FirstPage | LastPage | EditRow | ChooseKey | SaveRow | CancelEdit
+        | NextField | PrevField => table::run(s, tab, cmd, tx),
         ToggleRecord | CloseRecord | NextRecord | PrevRecord | CopyCell | CopyRow => match b.main {
             Main::Table => table::run(s, tab, cmd, tx),
             Main::Console => console::run(s, tab, cmd, tx),

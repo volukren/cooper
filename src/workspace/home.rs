@@ -6,7 +6,8 @@ use super::{
     model::{self, Focus},
 };
 use crate::{
-    connection, db,
+    connection::{self, SslMode},
+    db,
     dialog::Dialog,
     icons,
     keys::{self, Command, Ctx},
@@ -346,6 +347,9 @@ fn details(s: &Workspace, t: &Theme) -> El {
         ));
         fields.push(("User", conn.user.clone()));
         fields.push(("Database", conn.database.clone()));
+        if conn.ssl_mode != SslMode::default() {
+            fields.push(("SSL mode", conn.ssl_mode.label().to_string()));
+        }
     }
     fields.push(("URL", conn.summary()));
     if conn.read_only {
