@@ -892,15 +892,21 @@ fn help_opens_filters_and_closes() {
 }
 
 #[test]
-fn the_type_dropdown_switches_fields_and_ports() {
+fn the_type_checkboxes_switch_fields_and_ports() {
     let config = TestConfig::empty();
     let mut ws = TestWorkspace::open(&config);
     ws.press("cmd-n");
     ws.press("tab");
     assert_eq!(focused_field(&ws), Some("kind"));
-    ws.press("down");
-    ws.press("down");
-    ws.press("enter");
+    ws.click("form-kind-sqlite");
+    assert_eq!(values(&ws).kind, DbKind::Sqlite);
+    ws.click("form-kind-sqlite");
+    assert_eq!(
+        values(&ws).kind,
+        DbKind::Sqlite,
+        "the checked type stays checked"
+    );
+    ws.click("form-kind-mysql");
     let v = values(&ws);
     assert_eq!(v.kind, DbKind::MySql, "{v:?}");
     assert_eq!(v.port, "3306", "the default port follows the type");
@@ -1298,10 +1304,10 @@ fn zz_shell_snapshots() {
         shot(&mut ws, "home-new-button");
         ws.press("escape cmd-n");
         shot(&mut ws, "form-new");
-        ws.press("tab down");
-        shot(&mut ws, "form-type-open");
-        ws.press("escape");
-        set_kind(&mut ws, DbKind::Sqlite);
+        ws.click("form-kind-mysql");
+        shot(&mut ws, "form-type-mysql");
+        ws.click("form-kind-sqlite");
+        shot(&mut ws, "form-type-sqlite");
         ws.press("enter");
         shot(&mut ws, "form-sqlite-error");
         ws.press("escape");
