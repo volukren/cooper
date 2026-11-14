@@ -434,6 +434,10 @@ impl GridScroll {
 pub struct DataGrid {
     pub widths: Vec<f32>,
     pub natural: Vec<f32>,
+    /// What each column's content needs, in digits of the mono font: the widths follow a font
+    /// change from these.
+    cells: Vec<usize>,
+    gutter_cells: usize,
     pub gutter: f32,
     pub cell_width: f32,
     pub has_types: bool,
@@ -490,12 +494,11 @@ impl DataGrid {
     ) {
         let to_px = |cells: usize| cell_width * cells as f32 + CELL_PADDING;
         self.cell_width = cell_width;
-        self.natural = column_widths(columns, rows)
-            .into_iter()
-            .map(to_px)
-            .collect();
+        self.cells = column_widths(columns, rows);
+        self.gutter_cells = gutter_width(offset, rows.len());
+        self.natural = self.cells.iter().copied().map(to_px).collect();
         self.widths = self.natural.clone();
-        self.gutter = to_px(gutter_width(offset, rows.len()));
+        self.gutter = to_px(self.gutter_cells);
         self.has_types = columns.iter().any(|column| !column.type_name.is_empty());
         self.rows = rows.len();
         self.highlight = None;
@@ -677,6 +680,38 @@ impl DataGrid {
                 self.resize_from = None;
             }
         }
+    }
+
+    /// Sizes the columns for a mono font whose digits are `cell_width` wide: a column left at
+    /// its natural width follows its content, one the user dragged keeps its size in digits.
+    pub fn refit(&mut self, cell_width: f32) {
+        if cell_width <= 0.0 || cell_width == self.cell_width || self.cells.is_empty() {
+            return;
+        }
+        let to_px = |cells: usize| cell_width * cells as f32 + CELL_PADDING;
+        let scale = if self.cell_width > 0.0 {
+            cell_width / self.cell_width
+        } else {
+            1.0
+        };
+        for ((width, natural), &cells) in self
+            .widths
+            .iter_mut()
+            .zip(self.natural.iter_mut())
+            .zip(&self.cells)
+        {
+            let fitted = to_px(cells);
+            *width = if *width == *natural {
+                fitted
+            } else {
+                (*width * scale).max(MIN_COLUMN_WIDTH)
+            };
+            *natural = fitted;
+        }
+        self.gutter = to_px(self.gutter_cells);
+        self.cell_width = cell_width;
+        let (scroll_x, viewport) = self.scroll_x();
+        self.window = self.visible_columns(scroll_x, viewport);
     }
 
     pub fn reset_width(&mut self, col: usize) {

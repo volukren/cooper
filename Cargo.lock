@@ -786,11 +786,13 @@ version = "0.1.0"
 dependencies = [
  "color-eyre",
  "dirs",
+ "fontique",
  "futures-util",
  "keyring",
  "mysql",
  "native-tls",
  "postgres-native-tls",
+ "read-fonts",
  "rune",
  "rune-kit",
  "rusqlite",

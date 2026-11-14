@@ -7,7 +7,7 @@ use crate::{
     dialog::Dialog,
     form::{ConnectionForm, FormValues},
     keys::Command,
-    settings::{Page, ThemeMode},
+    settings::{Fonts, Page, ThemeMode},
     test_support::{TestConfig, TestWorkspace, sqlite_connection},
 };
 
@@ -1399,6 +1399,63 @@ fn the_theme_is_picked_in_the_settings_and_remembered() {
     assert!(!ws.read(|w| w.is_dark()));
 }
 
+fn families(ws: &TestWorkspace) -> (String, String) {
+    let (sans, mono) = ws.rt.font_families();
+    (sans.to_string(), mono.to_string())
+}
+
+#[test]
+fn fonts_are_picked_in_the_settings_and_remembered() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    let defaults = Fonts::default();
+    assert_eq!(
+        families(&ws),
+        (defaults.interface.clone(), defaults.code.clone())
+    );
+    ws.press("cmd-,");
+    assert!(ws.exists("settings-fonts"), "{}", ws.describe());
+    assert!(!ws.exists("reset-fonts"));
+
+    ws.click("font-code-value-trigger");
+    ws.type_text("Fira Code");
+    assert!(
+        says(&ws, "font-code-content", "Use “Fira Code”"),
+        "{}",
+        ws.describe()
+    );
+    ws.press("enter");
+    assert!(settings_open(&ws), "Enter only closes the picker");
+    assert_eq!(ws.read(|w| w.fonts.code.clone()), "Fira Code");
+    assert_eq!(families(&ws).1, "Fira Code", "the app switches at once");
+    assert!(settings_toml(&config).contains("code = \"Fira Code\""));
+    assert!(ws.exists("reset-fonts"));
+
+    ws.click("font-interface-value-trigger");
+    assert!(ws.exists("font-interface-content"));
+    ws.press("escape");
+    assert!(!ws.exists("font-interface-content"));
+    assert!(settings_open(&ws), "the first Esc only closes the picker");
+
+    ws.click("font-interface-value-trigger");
+    ws.type_text("Verdana");
+    ws.press("enter");
+    assert_eq!(ws.read(|w| w.fonts.interface.clone()), "Verdana");
+    assert_eq!(families(&ws).0, "Verdana");
+
+    let mut ws = TestWorkspace::open(&config);
+    assert_eq!(
+        families(&ws),
+        ("Verdana".to_string(), "Fira Code".to_string()),
+        "the first frame is drawn in the saved fonts"
+    );
+    ws.press("cmd-,");
+    ws.click("reset-fonts");
+    assert_eq!(ws.read(|w| w.fonts.clone()), defaults);
+    assert_eq!(families(&ws), (defaults.interface, defaults.code));
+    assert!(!settings_toml(&config).contains("fonts"));
+}
+
 fn settings_page(ws: &TestWorkspace) -> Option<Page> {
     ws.read(|w| match &w.dialog {
         Some(Dialog::Settings(settings)) => Some(settings.page()),
@@ -1531,5 +1588,37 @@ fn snapshots_of_the_settings() {
         shot(&mut ws, "03-recording");
         ws.press("cmd-w");
         shot(&mut ws, "04-conflict");
+        ws.click("settings-nav-general");
+        ws.click("font-code-value-trigger");
+        ws.type_text("Mon");
+        shot(&mut ws, "05-font-picker");
+        ws.press("enter");
+        shot(&mut ws, "06-font-chosen");
+    }
+}
+
+#[test]
+fn a_wide_font_keeps_the_connection_form_inside_its_dialog() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    let wide = "Menlo, Courier New";
+    ws.update(move |s, tx| {
+        s.set_fonts(
+            Fonts {
+                interface: wide.into(),
+                code: wide.into(),
+            },
+            tx,
+        )
+    });
+    ws.press("cmd-n");
+    for size in [crate::WINDOW_SIZE, crate::MIN_SIZE] {
+        ws.resize(size);
+        let found: Vec<String> = ws
+            .overflows()
+            .into_iter()
+            .filter(|found| found.contains("connection"))
+            .collect();
+        assert!(found.is_empty(), "at {size:?}: {found:#?}");
     }
 }

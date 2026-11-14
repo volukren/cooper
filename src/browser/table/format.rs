@@ -40,15 +40,6 @@ pub fn definition<'a>(defs: &'a [ColumnDef], column: &'a ColumnInfo) -> &'a str 
         .map_or(column.type_name.as_str(), |def| def.definition.as_str())
 }
 
-pub fn label_width(columns: &[ColumnInfo], defs: &[ColumnDef]) -> usize {
-    columns
-        .iter()
-        .map(|column| column.name.width().max(definition(defs, column).width()))
-        .max()
-        .unwrap_or(0)
-        .clamp(1, MAX_LABEL_WIDTH)
-}
-
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -163,8 +154,8 @@ pub fn copied(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_COLUMN_WIDTH, column_widths, copied, definition, gutter_width, label_width, normalize,
-        page_footer, record_footer, row_copy_text, wrap,
+        MAX_COLUMN_WIDTH, column_widths, copied, definition, gutter_width, normalize, page_footer,
+        record_footer, row_copy_text, wrap,
     };
     use crate::db::{ColumnDef, ColumnInfo, FullValue, FullValues, Page};
 
@@ -221,13 +212,12 @@ mod tests {
 
     #[test]
     fn labels_prefer_the_ddl_definition() {
-        let columns = vec![
+        let columns = [
             column("id", "INTEGER"),
             column("name", "TEXT"),
             column("note", ""),
         ];
         assert_eq!(definition(&[], &columns[0]), "INTEGER");
-        assert_eq!(label_width(&columns, &[]), 7);
         let defs = vec![
             ColumnDef {
                 name: "id".to_string(),
@@ -240,10 +230,6 @@ mod tests {
         ];
         assert_eq!(definition(&defs, &columns[0]), "INTEGER PRIMARY KEY");
         assert_eq!(definition(&defs, &columns[2]), "");
-        assert_eq!(label_width(&columns, &defs), 19);
-        let long = vec![column(&"x".repeat(50), "")];
-        assert_eq!(label_width(&long, &[]), 30);
-        assert_eq!(label_width(&[], &[]), 1);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use rune::{El, Tx, col, el, row, text};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant};
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use unicode_width::UnicodeWidthChar as _;
 
 use super::grid::{NULL, full_value};
 use crate::{
@@ -13,8 +13,8 @@ use crate::{
 
 pub const CUT_NOTE: &str = "… the value is longer, only its first 64 KB are loaded";
 const TAB_WIDTH: usize = 4;
+/// The labels' column stops growing at this many digits of its font.
 const MAX_LABEL_CHARS: usize = 30;
-const LABEL_CHAR_WIDTH: f32 = 7.;
 const LABEL_PADDING: f32 = 24.;
 pub const LINE_HEIGHT: f32 = 20.;
 pub const VALUE_PREFIX: &str = "record-value-";
@@ -76,17 +76,21 @@ pub fn record_text(text: &str) -> String {
     out
 }
 
-pub fn label_chars(fields: &[Field]) -> usize {
-    fields
+/// The labels' column: the widest name or type in the fonts in use, up to a cap.
+pub fn label_width(fields: &[Field], t: &Theme) -> f32 {
+    let digit = ui::text_width("0", t.text_sm).max(1.);
+    let widest = fields
         .iter()
-        .map(|field| field.name.width().max(field.definition.width()))
-        .max()
-        .unwrap_or(0)
-        .clamp(1, MAX_LABEL_CHARS)
+        .map(|field| {
+            ui::text_width(&field.name, t.semibold(t.text_sm))
+                .max(ui::text_width(&field.definition, t.text_xs))
+        })
+        .fold(digit, f32::max);
+    widest.min(MAX_LABEL_CHARS as f32 * digit).ceil() + LABEL_PADDING
 }
 
 pub fn view(tab: TabId, fields: &[Field], scroll: &ScrollY, t: &Theme) -> El {
-    let label_width = label_chars(fields) as f32 * LABEL_CHAR_WIDTH + LABEL_PADDING;
+    let label_width = label_width(fields, t);
     let blocks = fields.iter().enumerate().map(|(index, field)| {
         let label = col()
             .w(label_width)
@@ -162,8 +166,9 @@ pub fn view(tab: TabId, fields: &[Field], scroll: &ScrollY, t: &Theme) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{CUT_NOTE, Field, fields, label_chars, record_text};
+    use super::{CUT_NOTE, Field, LABEL_PADDING, fields, label_width, record_text};
     use crate::db::{ColumnInfo, FullValue, ScriptResult};
+    use crate::ui;
 
     fn result() -> ScriptResult {
         let column = |name: &str, type_name: &str| ColumnInfo {
@@ -237,16 +242,29 @@ mod tests {
     }
 
     #[test]
-    fn label_width_fits_names_and_types_with_a_cap() {
+    fn the_label_column_fits_names_and_types_with_a_cap() {
+        let t = crate::theme::theme(true);
         let row = fields(&result(), 0);
-        assert_eq!(label_chars(&row), 7);
-        let long = Field {
-            name: "x".repeat(50),
+        let widest = row
+            .iter()
+            .map(|field| {
+                ui::text_width(&field.name, t.semibold(t.text_sm))
+                    .max(ui::text_width(&field.definition, t.text_xs))
+            })
+            .fold(0., f32::max);
+        assert!(widest > 0.);
+        assert_eq!(label_width(&row, t), widest.ceil() + LABEL_PADDING);
+        let long = |n: usize| Field {
+            name: "x".repeat(n),
             definition: String::new(),
             value: None,
             cut: false,
         };
-        assert_eq!(label_chars(&[long]), 30);
-        assert_eq!(label_chars(&[]), 1);
+        assert_eq!(
+            label_width(&[long(50)], t),
+            label_width(&[long(500)], t),
+            "long names are capped"
+        );
+        assert!(label_width(&[], t) > LABEL_PADDING);
     }
 }

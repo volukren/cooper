@@ -1314,3 +1314,41 @@ fn cmd_f_finds_in_the_script() {
     ws.press("cmd-enter");
     assert!(is_running(&ws) || ws.console().outcome.is_some());
 }
+
+#[test]
+fn result_columns_follow_a_font_change_and_keep_dragged_widths() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = shop_console(&config);
+    set_sql(&mut ws, "SELECT id, name, email FROM customers ORDER BY id");
+    ws.press("cmd-enter");
+    assert!(ws.wait_script_done().starts_with("8 rows"));
+    let digit = || rune::text::advance("0", crate::theme::theme(true).mono);
+    let before = (digit(), ws.console().grid.widths.clone());
+    ws.update(|s, _| {
+        let widths = &mut s.active_browser_mut().unwrap().console.grid.widths;
+        widths[1] += 40.;
+    });
+    let dragged = ws.console().grid.widths[1];
+
+    ws.update(|s, tx| {
+        let mut fonts = s.fonts.clone();
+        fonts.code = "Courier New".into();
+        s.set_fonts(fonts, tx);
+    });
+    let result = ws.console().result().unwrap().clone();
+    let widths = ws.console().grid.widths.clone();
+    for index in [0, 2] {
+        assert_eq!(
+            Some(widths[index]),
+            grid::fit_width(&result, index),
+            "column {index} fits its content in the new font"
+        );
+    }
+    assert!(
+        (widths[1] - dragged * digit() / before.0).abs() < 0.01,
+        "a dragged column keeps its digits"
+    );
+    if digit() != before.0 {
+        assert_ne!(widths, before.1);
+    }
+}

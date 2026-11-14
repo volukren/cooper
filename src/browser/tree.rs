@@ -661,7 +661,7 @@ pub fn view(
     let tab = b.id;
     let title = row()
         .gap(6.0)
-        .min_w(0.0)
+        .shrink()
         .center_y()
         .child(ui::icon_el(&icons::DATABASE, 14.0, t.muted))
         .child(
@@ -943,22 +943,29 @@ fn row_view(b: &Browser, t: &Theme, ix: usize, tree_row: TreeRow, focused: bool)
                     label,
                     row()
                         .gap(4.0)
+                        .shrink()
                         .center_y()
                         .child(ui::icon_el(&icons::TRIANGLE_ALERT, 12.0, t.danger))
-                        .child(ui::label(label, t.text_sm, t.danger)),
+                        .child(ui::label(label, t.text_sm, t.danger).truncate().shrink()),
                 )
             } else if node.tables.is_some() {
                 let label = "no tables";
-                (label, row().child(ui::label(label, t.text_sm, t.muted)))
+                (
+                    label,
+                    row()
+                        .shrink()
+                        .child(ui::label(label, t.text_sm, t.muted).truncate().shrink()),
+                )
             } else {
                 let label = "loading…";
                 (
                     label,
                     row()
                         .gap(4.0)
+                        .shrink()
                         .center_y()
                         .child(ui::spinner(12.0, t.muted, t))
-                        .child(ui::label(label, t.text_sm, t.muted)),
+                        .child(ui::label(label, t.text_sm, t.muted).truncate().shrink()),
                 )
             };
             (1.0, label.to_string(), content)

@@ -365,7 +365,7 @@ fn details(s: &Workspace, t: &Theme) -> El {
                             row()
                                 .gap(8.0)
                                 .center_y()
-                                .min_w(0.0)
+                                .shrink()
                                 .child(
                                     text(db::render_text(&conn.name))
                                         .key("details-name")

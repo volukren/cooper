@@ -273,7 +273,7 @@ pub fn dialog(s: &Workspace, tab: TabId, t: &Theme, cx: &mut Cx<Workspace>, laye
     let title = view.title();
     let header = row()
         .gap(8.0)
-        .min_w(0.0)
+        .shrink()
         .center_y()
         .child(ui::icon_el(&icons::FILE_CODE, 16.0, t.muted))
         .child(

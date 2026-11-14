@@ -86,6 +86,15 @@ pub fn icon_el(glyph: &'static Icon, size: f32, color: Color) -> El {
     icon(glyph, size).color(color)
 }
 
+/// How wide `content` is on one line in `style`, in the fonts in use: for columns sized to their
+/// labels, which a guess per character gets wrong once the font changes.
+pub fn text_width(content: &str, style: TextStyle) -> f32 {
+    if content.is_empty() {
+        return 0.0;
+    }
+    rune::text::measure(content, &[], style, None).0
+}
+
 pub fn label(content: impl Into<String>, style: TextStyle, color: Color) -> El {
     text(content).font(style).color(color)
 }
@@ -131,7 +140,7 @@ pub fn pane(key: impl Into<String>, title: El, extra: Option<El>, body: El, t: &
                 .justify_between()
                 .fill(t.secondary)
                 .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
-                .child(row().gap(4.0).min_w(0.0).center_y().child(title))
+                .child(row().gap(4.0).shrink().center_y().child(title))
                 .children(extra),
         )
         .child(col().grow(1.0).min_h(0.0).min_w(0.0).child(body))

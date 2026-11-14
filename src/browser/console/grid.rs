@@ -99,6 +99,10 @@ pub enum Selection {
 #[derive(Debug, Default)]
 pub struct Grid {
     pub widths: Vec<f32>,
+    /// The widths that fit each column's content, which `refit` tells from dragged ones.
+    natural: Vec<f32>,
+    /// How wide a digit of the mono font was when the widths were fitted.
+    digit: f32,
     pub gutter: f32,
     pub typed: bool,
     pub selection: Option<Selection>,
@@ -181,6 +185,8 @@ impl Grid {
             .then_some(Selection::Cell(0, 1));
         let cols = 0..widths.len().min(INITIAL_COLUMNS);
         Self {
+            natural: widths.clone(),
+            digit: advance("0", m.mono),
             widths,
             gutter,
             typed,
@@ -189,6 +195,45 @@ impl Grid {
             cols,
             viewport: [0.; 4],
             scroll_x: 0.,
+        }
+    }
+
+    /// Sizes the columns again in the fonts in use: a column at its fitted width follows its
+    /// content, one the user dragged keeps its size in digits.
+    pub fn refit(&mut self, result: &ScriptResult) {
+        let fresh = Grid::new(result);
+        if fresh.widths.len() != self.widths.len() {
+            return;
+        }
+        let scale = if self.digit > 0. {
+            fresh.digit / self.digit
+        } else {
+            1.
+        };
+        for ((width, natural), fitted) in self
+            .widths
+            .iter_mut()
+            .zip(&self.natural)
+            .zip(&fresh.natural)
+        {
+            *width = if *width == *natural {
+                *fitted
+            } else {
+                (*width * scale).max(MIN_WIDTH)
+            };
+        }
+        self.natural = fresh.natural;
+        self.digit = fresh.digit;
+        self.gutter = fresh.gutter;
+    }
+
+    /// Puts column `index` back at the width that fits its content.
+    pub fn fit(&mut self, index: usize, width: f32) {
+        if let Some(slot) = self.widths.get_mut(index) {
+            *slot = width;
+        }
+        if let Some(natural) = self.natural.get_mut(index) {
+            *natural = width;
         }
     }
 
@@ -534,9 +579,7 @@ fn header_cell(
             else {
                 return;
             };
-            if let Some(slot) = b.console.grid.widths.get_mut(index) {
-                *slot = width.max(MIN_WIDTH);
-            }
+            b.console.grid.fit(index, width.max(MIN_WIDTH));
         });
     row()
         .key(format!("console-grid-col-{index}"))

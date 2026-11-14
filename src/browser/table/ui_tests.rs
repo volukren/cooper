@@ -1285,3 +1285,28 @@ fn closing_the_row_view_shows_the_row_it_stepped_to() {
     assert!(ws.is_visible("table-row-60"), "the selected row is in view");
     assert!(!ws.exists("table-row-0") || !ws.is_visible("table-row-0"));
 }
+
+#[test]
+fn data_columns_follow_a_font_change_and_keep_dragged_widths() {
+    let (_config, _path, mut ws) = connect_fixture();
+    ws.open_table("people");
+    let digit = || table::grid::mono_cell_width(crate::theme::theme(true));
+    let before = digit();
+    assert_eq!(view(&ws).cells.cell_width, before);
+    ws.update(|s, _| browser_mut(s).table.cells.widths[1] += 40.0);
+    let dragged = view(&ws).cells.widths[1];
+
+    ws.update(|s, tx| {
+        let mut fonts = s.fonts.clone();
+        fonts.code = "Courier New".into();
+        s.set_fonts(fonts, tx);
+    });
+    let cells = &view(&ws).cells;
+    assert_eq!(cells.cell_width, digit(), "sized in the new font");
+    assert_eq!(cells.widths[0], cells.natural[0]);
+    assert_eq!(cells.widths[2], cells.natural[2]);
+    assert!(
+        (cells.widths[1] - dragged * digit() / before).abs() < 0.01,
+        "a dragged column keeps its digits"
+    );
+}

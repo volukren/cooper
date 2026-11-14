@@ -17,7 +17,7 @@ use super::{
     confirm::{Confirm, Pending},
 };
 use crate::{
-    db::{self, Page, RowUpdate, TableDdl, TableKind},
+    db::{self, ColumnDef, ColumnInfo, Page, RowUpdate, TableDdl, TableKind},
     dialog::Dialog,
     guard, icons,
     keys::{self, Command, Ctx},
@@ -29,13 +29,10 @@ use crate::{
 use self::{
     edit::{Draft, Exact},
     format::{
-        CUT_NOTE, NULL, cell_copy_text, copied, definition, full_value, kind_label, label_width,
-        normalize, page_footer, record_footer, row_copy_text,
+        CUT_NOTE, MAX_LABEL_WIDTH, NULL, cell_copy_text, copied, definition, full_value,
+        kind_label, normalize, page_footer, record_footer, row_copy_text,
     },
-    grid::{
-        CELL_PADDING, COUNTING_HINT, DataGrid, Grid, GridData, GridSpec, Move, Notice, PageArrival,
-        Update,
-    },
+    grid::{COUNTING_HINT, DataGrid, Grid, GridData, GridSpec, Move, Notice, PageArrival, Update},
 };
 
 const KEY: &str = "table-view";
@@ -931,7 +928,7 @@ fn title_view(b: &Browser, grid: &Grid, t: &Theme) -> El {
     }
     row()
         .gap(6.0)
-        .min_w(0.0)
+        .shrink()
         .center_y()
         .children(record.then(|| {
             icon_button(
@@ -1037,11 +1034,25 @@ fn error_view(b: &Browser, error: &str, t: &Theme) -> El {
         )
 }
 
+/// The record view's labels column: the widest name (with the changed mark) or definition in the
+/// fonts in use, up to `MAX_LABEL_WIDTH` digits.
+fn label_width(columns: &[ColumnInfo], defs: &[ColumnDef], t: &Theme) -> f32 {
+    let digit = grid::mono_cell_width(t);
+    let mark = ui::text_width("•", t.mono) + 4.0;
+    let widest = columns
+        .iter()
+        .map(|column| {
+            (ui::text_width(&column.name, t.bold(t.mono)) + mark)
+                .max(ui::text_width(&normalize(definition(defs, column)), t.mono))
+        })
+        .fold(digit, f32::max);
+    widest.min(MAX_LABEL_WIDTH as f32 * digit).ceil() + 18.0
+}
+
 fn record_view(b: &Browser, grid: &Grid, page: &Page, t: &Theme) -> El {
     let tab = b.id;
     let defs = grid.ddl().map_or(&[][..], |ddl| ddl.columns.as_slice());
-    let cell = grid::mono_cell_width(t);
-    let label_w = cell * label_width(&page.columns, defs) as f32 + CELL_PADDING + 4.0 + 16.0;
+    let label_w = label_width(&page.columns, defs, t);
     let row_index = grid.row();
     let draft = b
         .table
@@ -1275,7 +1286,7 @@ fn save_bar(tab: TabId, draft: &Draft, t: &Theme) -> El {
         Some(error) => row()
             .key("row-editor-error")
             .gap(8.0)
-            .min_w(0.0)
+            .shrink()
             .center_y()
             .child(ui::icon_el(&icons::CIRCLE_X, 14.0, t.danger))
             .child(
@@ -1285,15 +1296,19 @@ fn save_bar(tab: TabId, draft: &Draft, t: &Theme) -> El {
                     .truncate()
                     .min_w(0.0),
             ),
-        None => row().min_w(0.0).child(ui::label(
-            match changes {
-                0 => "Editing: no changes yet".to_string(),
-                1 => "1 value changed".to_string(),
-                n => format!("{n} values changed"),
-            },
-            t.text_sm,
-            t.muted,
-        )),
+        None => row().shrink().child(
+            ui::label(
+                match changes {
+                    0 => "Editing: no changes yet".to_string(),
+                    1 => "1 value changed".to_string(),
+                    n => format!("{n} values changed"),
+                },
+                t.text_sm,
+                t.muted,
+            )
+            .truncate()
+            .shrink(),
+        ),
     };
     let save_variant = if draft.saving {
         ButtonVariant::Loading

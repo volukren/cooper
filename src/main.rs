@@ -2,6 +2,7 @@ mod browser;
 mod connection;
 mod db;
 mod dialog;
+mod fonts;
 mod form;
 mod guard;
 mod help;
@@ -20,6 +21,7 @@ use rune::{App, AppSpec, MenuItem, Shortcut, Titlebar, Tx};
 use crate::{
     connection::Store,
     keys::Command,
+    settings::SettingsFile,
     workspace::{TITLEBAR_HEIGHT, Workspace},
 };
 
@@ -27,10 +29,10 @@ pub const WINDOW_SIZE: (f32, f32) = (1280.0, 820.0);
 pub const MIN_SIZE: (f32, f32) = (760.0, 480.0);
 const APP_ICON: &[u8] = include_bytes!("../assets/icons/icon.png");
 
-pub fn spec() -> AppSpec<Workspace> {
+pub fn spec(families: (&'static str, &'static str)) -> AppSpec<Workspace> {
     AppSpec {
         min_size: Some(MIN_SIZE),
-        families: theme::FAMILIES,
+        families,
         setup: Some(workspace::setup),
         poll: Some(workspace::poll),
         on_key: Some(keys::app_on_key),
@@ -102,7 +104,9 @@ fn menu_items() -> Vec<MenuItem<Workspace>> {
 }
 
 pub fn app(store: Store) -> App<Workspace> {
-    let app = App::new(spec());
+    // The first frame is drawn in the chosen fonts; the workspace reports any problem with them.
+    let fonts = SettingsFile::at(store.settings_path()).fonts();
+    let app = App::new(spec(fonts.leak()));
     let handle = app.handle();
     let app = app
         .init(move || {

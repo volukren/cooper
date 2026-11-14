@@ -13,10 +13,11 @@ use crate::{
     connection::{self, Connection, Store},
     db::{Response, Session},
     dialog::{self, Dialog},
+    fonts,
     form::{ConnectionForm, FormDialog},
     icons,
     keys::{self, Command, Ctx, Keymap},
-    settings::{SettingsFile, ThemeMode},
+    settings::{Fonts, SettingsFile, ThemeMode},
     theme::{Theme, theme},
     ui,
 };
@@ -79,11 +80,17 @@ pub struct Workspace {
     pub home: Home,
     pub load_error: Option<String>,
     pub scratch: TextEdit,
+    pub scratch_picker: rune_kit::ComboboxState,
     pub tabs: Vec<Tab>,
     pub active: Option<usize>,
     pub dialog: Option<Dialog>,
     pub toasts: Vec<Toast>,
     pub theme_mode: ThemeMode,
+    pub fonts: Fonts,
+    /// The families installed on this computer, once they were scanned.
+    pub installed_fonts: Option<&'static fonts::Installed>,
+    /// The fonts the grids' columns were last sized in (`rune::text::font_epoch`).
+    font_epoch: u64,
     pub system_dark: Cell<bool>,
     pub window_title: String,
     pub waker: Option<Waker>,
@@ -107,9 +114,17 @@ impl Workspace {
         };
         let settings = SettingsFile::at(store.settings_path());
         let mut keymap = Keymap::default();
-        let (theme_mode, settings_problem) = match settings.load(&mut keymap) {
-            Ok(loaded) => (loaded.theme, loaded.problems.into_iter().next()),
-            Err(err) => (ThemeMode::default(), Some(format!("{err:#}"))),
+        let (theme_mode, fonts, settings_problem) = match settings.load(&mut keymap) {
+            Ok(loaded) => (
+                loaded.theme,
+                loaded.fonts,
+                loaded.problems.into_iter().next(),
+            ),
+            Err(err) => (
+                ThemeMode::default(),
+                Fonts::default(),
+                Some(format!("{err:#}")),
+            ),
         };
         let menu_stale = keymap.any_modified();
         keys::update(|current| *current = keymap);
@@ -117,11 +132,15 @@ impl Workspace {
             home: Home::new(store, connections),
             load_error,
             scratch: TextEdit::new(""),
+            scratch_picker: rune_kit::ComboboxState::default(),
             tabs: Vec::new(),
             active: None,
             dialog: None,
             toasts: Vec::new(),
             theme_mode,
+            fonts,
+            installed_fonts: fonts::installed(),
+            font_epoch: rune::text::font_epoch(),
             system_dark: Cell::new(true),
             window_title: model::APP_TITLE.to_string(),
             waker: None,
@@ -158,6 +177,15 @@ impl Workspace {
         }
     }
 
+    /// Puts `fonts` behind the sans and mono slots of every window and remembers them.
+    pub fn set_fonts(&mut self, fonts: Fonts, tx: &mut Tx) {
+        if self.fonts != fonts {
+            tx.set_font_families(fonts.interface.clone(), fonts.code.clone());
+            self.fonts = fonts;
+            self.save_settings(tx);
+        }
+    }
+
     pub fn on_menu_change(&mut self, sync: impl Fn() -> Result<(), MenuError> + 'static) {
         self.menu_sync = Some(Box::new(sync));
     }
@@ -168,7 +196,7 @@ impl Workspace {
     }
 
     fn save_settings(&mut self, tx: &mut Tx) {
-        let saved = keys::with(|keymap| self.settings.save(self.theme_mode, keymap));
+        let saved = keys::with(|keymap| self.settings.save(self.theme_mode, &self.fonts, keymap));
         if let Err(err) = saved {
             let text = format!("The settings were not saved: {err:#}");
             if !self.toasts.iter().any(|toast| toast.text == text) {
@@ -511,6 +539,22 @@ impl Workspace {
             index += 1;
         }
         changed |= self.expire_toasts(tx);
+        let epoch = rune::text::font_epoch();
+        if epoch != self.font_epoch {
+            self.font_epoch = epoch;
+            for tab in &mut self.tabs {
+                if let TabState::Browser(browser) = &mut tab.state {
+                    browser.fonts_changed();
+                }
+            }
+            changed = true;
+        }
+        if self.installed_fonts.is_none()
+            && let Some(installed) = fonts::installed()
+        {
+            self.installed_fonts = Some(installed);
+            changed = true;
+        }
         self.sync_menu();
         if self.dialog.is_none() {
             let on_list = self.active.is_none() && tx.focused() == Some("home");
@@ -704,6 +748,7 @@ impl Workspace {
             Some(Dialog::Settings(_)) => self.close_dialog(tx),
             None => {
                 self.dialog = Some(Dialog::Settings(Box::default()));
+                fonts::scan_in_background(self.waker.clone());
             }
             Some(_) => return false,
         }

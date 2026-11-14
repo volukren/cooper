@@ -1,7 +1,8 @@
 use std::cell::Cell;
 
 use rune::{
-    Cx, El, FileDialogOptions, FileDialogResult, Key, KeyEvent, TextEdit, Tx, col, row, text,
+    Cx, El, FileDialogOptions, FileDialogResult, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row,
+    text,
 };
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog as KitDialog, IconButton, IconButtonVariant,
@@ -187,9 +188,36 @@ pub fn database_placeholder(kind: DbKind) -> &'static str {
 }
 
 const LABEL_WIDTH: f32 = 112.0;
+/// The dialog's title, footer and margins around the fields.
+const FORM_CHROME: f32 = 150.0;
+/// The widest the labels grow in a wide font before they wrap.
+const MAX_LABEL_WIDTH: f32 = 168.0;
 /// The space between a field's label and its control.
 const FIELD_GAP: f32 = 12.0;
-const CONTROL_WIDTH: f32 = 344.0;
+/// What a row has for its label, the gap and its control.
+const ROW_WIDTH: f32 = 468.0;
+const LABELS: [&str; 10] = [
+    "Name",
+    "Type",
+    "Host",
+    "Port",
+    "User",
+    "Password",
+    "Store password",
+    "Database",
+    "File path",
+    "Environment",
+];
+
+/// The labels' column: as wide as the longest label in the current font, so a wide font
+/// doesn't push a label into its field. The controls get what's left.
+fn label_width(t: &Theme) -> f32 {
+    LABELS
+        .iter()
+        .map(|label| rune::text::measure(label, &[], t.text_sm, None).0.ceil())
+        .fold(LABEL_WIDTH, f32::max)
+        .min(MAX_LABEL_WIDTH)
+}
 const FIELDS: [&str; 6] = ["name", "host", "port", "user", "password", "database"];
 
 pub struct FormDialog {
@@ -213,6 +241,8 @@ pub struct ConnectionForm {
     pub tag_open: bool,
     pub error: Option<String>,
     pub last_field: Cell<Option<&'static str>>,
+    /// The fields scroll when a wide font or a short window doesn't fit them.
+    pub scroll: ui::ScrollY,
 }
 
 impl ConnectionForm {
@@ -253,6 +283,7 @@ impl ConnectionForm {
             tag_open: false,
             error,
             last_field: Cell::new(Some("name")),
+            scroll: ui::ScrollY::default(),
         }
     }
 
@@ -483,7 +514,8 @@ fn field_row(label: &str, control: El, t: &Theme) -> El {
             text(label.to_string())
                 .font(t.text_sm)
                 .color(t.foreground)
-                .w(LABEL_WIDTH),
+                .wrap()
+                .w(label_width(t)),
         )
         .child(col().grow(1.0).min_w(0.0).child(control))
 }
@@ -532,7 +564,7 @@ pub fn dialog(
     _s: &Workspace,
     session: &FormDialog,
     t: &Theme,
-    _cx: &mut Cx<Workspace>,
+    cx: &mut Cx<Workspace>,
     layer: &mut Vec<El>,
 ) {
     let form = &session.form;
@@ -552,7 +584,7 @@ pub fn dialog(
 
     let kind = Select::new("form-kind", &kind_labels())
         .appearance(SelectAppearance::Field)
-        .width(CONTROL_WIDTH)
+        .width(ROW_WIDTH - FIELD_GAP - label_width(t))
         .label("Type")
         .current(Some(form.kind.label()))
         .open(form.kind_open)
@@ -578,7 +610,7 @@ pub fn dialog(
 
     let tag = Select::new("form-tag", &tag_labels())
         .appearance(SelectAppearance::Field)
-        .width(CONTROL_WIDTH)
+        .width(ROW_WIDTH - FIELD_GAP - label_width(t))
         .label("Environment")
         .current(Some(tag_label(form.tag)))
         .open(form.tag_open)
@@ -658,12 +690,15 @@ pub fn dialog(
         .on_key(field_key)
         .build(&t.k)
         .key("form-password");
+        // The choices wrap onto a second line when a wide font doesn't fit them side by side.
         let storage = row()
             .key("form-storage")
             .role("radiogroup")
             .label("Store password")
             .focus_group()
-            .gap(16.0)
+            .w_full()
+            .flex_wrap()
+            .gaps(6.0, 16.0)
             .center_y()
             .children(STORAGES.into_iter().map(|storage| {
                 RadioItem::new(storage_label(storage), form.storage == storage)
@@ -713,7 +748,7 @@ pub fn dialog(
         body = body.child(
             row()
                 .w_full()
-                .child(col().w(LABEL_WIDTH + FIELD_GAP))
+                .child(col().w(label_width(t) + FIELD_GAP))
                 .child(
                     text(PROD_HINT)
                         .key("form-tag-hint")
@@ -770,6 +805,23 @@ pub fn dialog(
                 .build(&t.k)
                 .key("save-connection"),
         );
+    // A fit dialog doesn't scroll, so the fields do once they're taller than the window has
+    // room for beside the title, the footer and the margins.
+    let room = cx
+        .layout_size("workspace")
+        .map_or(f32::INFINITY, |[_, height]| {
+            (height - FORM_CHROME).max(160.0)
+        });
+    let body = form.scroll.watch(
+        col()
+            .key("connection-form-scroll")
+            .w_full()
+            .max_h(room)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(body),
+    );
     KitDialog::new("connection", form.title())
         .width(500.0)
         .fit()

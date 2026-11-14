@@ -191,11 +191,27 @@ impl TestWorkspace {
     }
 
     pub fn open_with(store: Store, dark: bool) -> Self {
-        let mut rt = crate::app(store).headless_runtime(WINDOW_SIZE, Env::new(dark, 1.0));
+        let size = std::env::var("COOPER_TEST_SIZE")
+            .ok()
+            .and_then(|size| {
+                let (w, h) = size.split_once('x')?;
+                Some((w.parse().ok()?, h.parse().ok()?))
+            })
+            .unwrap_or(WINDOW_SIZE);
+        let mut rt = crate::app(store).headless_runtime(size, Env::new(dark, 1.0));
         rt.set_system_reduced_motion(true);
         let clip = clipboard::memory();
         rt.use_clipboard(&clip);
         rt.frame(0.0);
+        // A layout survey: `COOPER_TEST_FONTS="Sans|Mono"` and `COOPER_TEST_SIZE=760x480` run
+        // every UI test in other fonts or another window size, and `COOPER_OVERFLOW_LOG=path`
+        // appends what `overflows` finds after each settle.
+        if let Ok(fonts) = std::env::var("COOPER_TEST_FONTS")
+            && let Some((sans, mono)) = fonts.split_once('|')
+        {
+            let (sans, mono) = (sans.to_string(), mono.to_string());
+            rt.update(move |_, tx| tx.set_font_families(sans, mono));
+        }
         let mut ws = Self { rt, clip };
         ws.settle();
         ws
@@ -225,6 +241,87 @@ impl TestWorkspace {
         for _ in 0..SETTLE_FRAMES {
             self.rt.frame(DT);
         }
+        if let Ok(log) = std::env::var("COOPER_OVERFLOW_LOG") {
+            let found = self.overflows();
+            if !found.is_empty() {
+                use std::io::Write;
+                let test = std::thread::current().name().unwrap_or("?").to_string();
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log)
+                {
+                    for line in found {
+                        let _ = writeln!(file, "{test}\t{line}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Elements drawn past their parent's box with nothing clipping them: what a wider font
+    /// pushes out of a row, a field or a dialog.
+    pub fn overflows(&self) -> Vec<String> {
+        const SLACK: f32 = 1.0;
+        let all = self.rt.elements();
+        let name = |i: usize| {
+            let e = &all[i];
+            e.key
+                .clone()
+                .unwrap_or_else(|| format!("{}#{}", e.role, e.path))
+        };
+        let mut found = Vec::new();
+        for (i, e) in all.iter().enumerate() {
+            let Some(p) = e.parent else { continue };
+            let parent = &all[p];
+            if e.exiting || e.opacity <= 0.0 || e.moving || e.rect[2] <= 0.0 || e.rect[3] <= 0.0 {
+                continue;
+            }
+            if e.visible != e.rect {
+                // Text cut off by a box that clips it, short of a scroll view's edge.
+                let cut = e.rect[2] - e.visible[2];
+                if e.role == "text" && e.visible[2] > 0.0 && e.visible[3] > 0.0 && cut > SLACK {
+                    found.push(format!(
+                        "CLIPPED {} text={:?} by {cut:.0} | {}",
+                        name(i),
+                        e.text.as_deref().unwrap_or(""),
+                        e.path,
+                    ));
+                }
+                continue;
+            }
+            let [x, y, w, h] = e.rect;
+            let [px, py, pw, ph] = parent.rect;
+            let left = px - x;
+            let right = (x + w) - (px + pw);
+            let top = py - y;
+            let bottom = (y + h) - (py + ph);
+            if [left, right, top, bottom].iter().all(|d| *d <= SLACK) {
+                continue;
+            }
+            let mut chain = Vec::new();
+            let mut up = Some(i);
+            while let Some(j) = up {
+                if all[j].key.is_some() {
+                    chain.push(name(j));
+                }
+                up = all[j].parent;
+            }
+            chain.reverse();
+            found.push(format!(
+                "{} [{}] text={:?} out of {} by l{:.0} r{:.0} t{:.0} b{:.0} | {}",
+                name(i),
+                e.role,
+                e.text.as_deref().or(e.label.as_deref()).unwrap_or(""),
+                name(p),
+                left.max(0.0),
+                right.max(0.0),
+                top.max(0.0),
+                bottom.max(0.0),
+                chain.join(" > "),
+            ));
+        }
+        found
     }
 
     pub fn step(&mut self) {

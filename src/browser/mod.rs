@@ -173,6 +173,16 @@ impl Browser {
         self.server_info = (!server_info.trim().is_empty()).then_some(server_info);
     }
 
+    /// Sizes the data grid and the script result's columns again after the fonts changed.
+    pub fn fonts_changed(&mut self) {
+        self.table
+            .cells
+            .refit(table::grid::mono_cell_width(crate::theme::theme(true)));
+        if let Some(result) = self.console.result().cloned() {
+            self.console.grid.refit(&result);
+        }
+    }
+
     pub fn set_waker(&self, waker: Waker) {
         self.session.set_waker(move || waker());
     }
@@ -617,13 +627,14 @@ fn status_bar(b: &Browser, t: &Theme) -> El {
             .key("browser-status")
             .gap(4.0)
             .center_y()
-            .min_w(0.0)
+            .shrink()
             .children(error.then(|| ui::icon_el(&icons::CIRCLE_X, 12.0, t.danger)))
             .child(
                 text(message.clone())
                     .font(t.text_xs)
                     .color(if *error { t.danger } else { t.warning })
-                    .truncate(),
+                    .truncate()
+                    .shrink(),
             )
     });
     let info = b
