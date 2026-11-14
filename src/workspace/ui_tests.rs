@@ -686,6 +686,66 @@ fn a_new_sqlite_connection_is_saved_selected_and_connectable() {
 }
 
 #[test]
+fn a_connection_url_fills_in_the_new_form() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let path = config.dir().join("data").join("shop.db");
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-n");
+    assert!(ws.exists("form-url"));
+    assert_eq!(focused_field(&ws), Some("name"), "the name is still first");
+
+    focus_field(&mut ws, "url");
+    ws.type_text("mysql://root:p%40ss@db.example.com/app");
+    let v = values(&ws);
+    assert_eq!(v.kind, DbKind::MySql);
+    assert_eq!(v.host, "db.example.com");
+    assert_eq!(v.port, "3306", "a missing port becomes the default one");
+    assert_eq!(v.user, "root");
+    assert_eq!(v.password, "p@ss");
+    assert_eq!(v.database, "app");
+
+    ws.replace_text("redis://localhost");
+    assert_eq!(
+        values(&ws).host,
+        "db.example.com",
+        "a bad URL changes nothing"
+    );
+    focus_field(&mut ws, "name");
+    ws.type_text("copy of shop");
+    ws.press("enter");
+    assert_eq!(
+        form_error(&ws).as_deref(),
+        Some(
+            "Invalid connection URL: unsupported scheme \"redis\", \
+             expected postgres://, mysql:// or sqlite://"
+        )
+    );
+
+    focus_field(&mut ws, "url");
+    ws.replace_text(&format!("sqlite://{}", path.to_string_lossy()));
+    assert_eq!(form_error(&ws), None);
+    assert_eq!(values(&ws).kind, DbKind::Sqlite);
+    assert_eq!(values(&ws).database, path.to_string_lossy());
+    ws.press("enter");
+    wait_dialog_closed(&mut ws);
+    assert_eq!(
+        store_names(&config.connections_path()),
+        ["shop", "copy of shop"]
+    );
+    ws.press("enter");
+    ws.wait_connected("copy of shop");
+}
+
+#[test]
+fn editing_a_connection_has_no_url_field() {
+    let config = TestConfig::with_sample_dbs(&["shop"]);
+    let mut ws = TestWorkspace::open(&config);
+    ws.press("cmd-e");
+    assert_eq!(form_original(&ws), Some("shop".into()));
+    assert!(!ws.exists("form-url"));
+}
+
+#[test]
 fn a_new_connection_can_keep_its_password_in_plain_text() {
     let config = TestConfig::empty();
     let mut ws = TestWorkspace::open(&config);

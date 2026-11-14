@@ -1,20 +1,3 @@
-//! Finds the statements of a script that may change data or schema, so a connection tagged
-//! Production can ask before running them.
-//!
-//! The lexer splits the script on `;` and skips comments and quoted text the way the dialect
-//! does. Where it cannot be sure, it errs towards showing more code to the classifier: hiding
-//! text could miss a write, while showing too much only asks once more. A statement counts as
-//! read-only only when its verb is known to read (`SELECT`, `SHOW`, `EXPLAIN` without
-//! `ANALYZE`…) and nothing inside it writes: a data-modifying `WITH`, `SELECT … INTO` or a
-//! built-in function with side effects such as `nextval()`.
-//!
-//! Postgres and MySQL read backslashes in quoted text by a server setting
-//! (`standard_conforming_strings`, `NO_BACKSLASH_ESCAPES`) the client cannot see, so
-//! [`writes`] lexes their scripts both ways and lists what either way finds.
-//!
-//! Known limitation: a `SELECT` that calls a user-defined function which writes cannot be
-//! detected. Only the built-ins in [`SIDE_EFFECT_FUNCTIONS`] are.
-
 #[cfg(test)]
 mod tests;
 
@@ -112,13 +95,8 @@ const PLAIN_READS: [&str; 17] = [
     "UNLOCK",
 ];
 
-/// The words that, right after `(`, start a statement of its own to classify: a
-/// data-modifying `WITH` query, which may have a `WITH` of its own.
 const NESTED_STATEMENTS: [&str; 5] = ["INSERT", "UPDATE", "DELETE", "MERGE", "WITH"];
 
-/// The words that may follow `BEGIN` when it starts a transaction (Postgres's modes, SQLite's
-/// `DEFERRED`/`IMMEDIATE`/`EXCLUSIVE`). Anything else, such as MariaDB's `BEGIN NOT ATOMIC`
-/// block, is not a plain `BEGIN`.
 const TRANSACTION_WORDS: [&str; 16] = [
     "TRANSACTION",
     "WORK",
@@ -156,8 +134,6 @@ const PRAGMA_WRITES: [&str; 4] = [
     "shrink_memory",
 ];
 
-/// Pragmas that take an argument in parentheses and only read. Any other `PRAGMA name(value)`
-/// sets the pragma, as `PRAGMA name = value` does.
 const PRAGMA_QUERIES: [&str; 11] = [
     "table_info",
     "table_xinfo",
@@ -174,21 +150,11 @@ const PRAGMA_QUERIES: [&str; 11] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
-    /// A display label such as `DELETE`, `WITH … UPDATE` or `EXPLAIN ANALYZE DELETE`.
     pub verb: String,
-    /// A one-line preview of the statement's source.
     pub text: String,
-    /// The statement holds an `UPDATE` or `DELETE` with no `WHERE` at its own level.
     pub unbounded: bool,
 }
 
-/// The statements of `sql` that are not proven read-only. Empty means the script runs without
-/// asking.
-///
-/// Postgres and MySQL scripts are lexed twice, with and without backslash escapes in quoted
-/// text, and the writes either pass finds are listed once each. A piece left inside an
-/// unterminated quote is listed only when the other pass cannot close it either: when it
-/// can, the server reads the script that way or rejects it, so the hidden text never runs.
 pub fn writes(sql: &str, kind: DbKind) -> Vec<Statement> {
     let escapes = kind == DbKind::MySql;
     let mut found = scan(sql, kind, escapes);
@@ -208,8 +174,6 @@ pub fn writes(sql: &str, kind: DbKind) -> Vec<Statement> {
     found
 }
 
-/// The pending row edit as the UPDATE that saves it, for the confirmation list. Fails as the
-/// save itself would, for an edit that cannot be sent.
 pub fn row_update(kind: DbKind, update: &RowUpdate) -> Result<Statement, String> {
     let sql = db::update_sql(kind, update, |value| {
         value.map_or_else(
@@ -283,7 +247,6 @@ struct Token {
 #[derive(Debug, Default)]
 struct Piece {
     tokens: Vec<Token>,
-    /// The piece ends inside a quote or comment that never closes.
     open: bool,
 }
 
@@ -421,8 +384,6 @@ impl Lexer<'_> {
         pieces
     }
 
-    /// The length of the `$tag$` opening a Postgres dollar-quoted string at `at`, if one does.
-    /// A `$` right after a word or another `$` belongs to that name.
     fn dollar_quote(&self, bytes: &[u8], at: usize) -> Option<usize> {
         let after_name = at > 0 && (is_word(bytes[at - 1]) || bytes[at - 1] == b'$');
         if self.kind != DbKind::Postgres || after_name {
@@ -431,14 +392,10 @@ impl Lexer<'_> {
         dollar_delimiter(&bytes[at..])
     }
 
-    /// Whether `--` starts a comment, given the byte after it. MySQL needs a space or a
-    /// control character there, so `1--1` is arithmetic.
     fn line_comment(&self, after: Option<u8>) -> bool {
         self.kind != DbKind::MySql || after.is_none_or(|c| c.is_ascii_whitespace() || c < b' ')
     }
 
-    /// The end of the line comment starting at `at`. Postgres ends one at a lone `\r` too;
-    /// MySQL and SQLite only at `\n`.
     fn line_end(&self, bytes: &[u8], at: usize) -> usize {
         let cr = self.kind == DbKind::Postgres;
         bytes[at..]
@@ -447,8 +404,6 @@ impl Lexer<'_> {
             .map_or(bytes.len(), |n| at + n + 1)
     }
 
-    /// MySQL's `/*!NNNNN … */` and `/*M!NNNNN … */` run their contents: skip only the opener
-    /// and its version digits. The closing `*/` is skipped like any stray one.
     fn executable_comment(&self, bytes: &[u8], at: usize) -> Option<usize> {
         if self.kind != DbKind::MySql {
             return None;
@@ -464,8 +419,6 @@ impl Lexer<'_> {
         Some(run_end(bytes, at + opener, |c| c.is_ascii_digit()))
     }
 
-    /// The end of the block comment opening at `at`, or `None` when it never closes. Postgres
-    /// nests block comments; MySQL and SQLite close at the first `*/`.
     fn block_comment_end(&self, bytes: &[u8], at: usize) -> Option<usize> {
         let nests = self.kind == DbKind::Postgres;
         let mut level = 1;
@@ -494,8 +447,6 @@ fn run_end(bytes: &[u8], at: usize, keep: impl Fn(u8) -> bool) -> usize {
     at + bytes[at..].iter().take_while(|&&c| keep(c)).count()
 }
 
-/// The end of the quoted text opening at `at` and whether it closes. A doubled quote stands
-/// for itself; with `escapes`, a backslash escapes the next byte.
 fn quoted_end(bytes: &[u8], at: usize, quote: u8, escapes: bool) -> (usize, bool) {
     let mut i = at + 1;
     while i < bytes.len() {
@@ -535,7 +486,6 @@ fn upper(src: &str, token: &Token) -> Option<String> {
     word(src, token).map(str::to_ascii_uppercase)
 }
 
-/// The name `token` gives a function: a word, or an identifier in `"…"`, `` `…` `` or `[…]`.
 fn function_name<'a>(src: &'a str, token: &Token) -> Option<&'a str> {
     let text = &src[token.start..token.end];
     match token.tok {
@@ -547,7 +497,6 @@ fn function_name<'a>(src: &'a str, token: &Token) -> Option<&'a str> {
     }
 }
 
-/// Classifies one statement. `None` means it only reads.
 fn classify(src: &str, kind: DbKind, toks: &[Token]) -> Option<Verdict> {
     let start = toks.iter().position(|t| t.tok != Tok::Open);
     let Some((rest, verb)) = start.and_then(|at| Some((&toks[at..], upper(src, &toks[at])?)))
@@ -595,7 +544,6 @@ fn classify(src: &str, kind: DbKind, toks: &[Token]) -> Option<Verdict> {
     }
 }
 
-/// Whether `stmt`, starting at its `UPDATE` or `DELETE` verb, has no `WHERE` at its own level.
 fn unbounded(src: &str, stmt: &[Token]) -> bool {
     let verb = &stmt[0];
     let changes = is(src, verb, "UPDATE") || is(src, verb, "DELETE");
@@ -605,8 +553,6 @@ fn unbounded(src: &str, stmt: &[Token]) -> bool {
             .any(|t| t.depth == verb.depth && is(src, t, "WHERE"))
 }
 
-/// The verdicts of the statements in parentheses that start with one of
-/// [`NESTED_STATEMENTS`]: data-modifying `WITH` queries and the like.
 fn nested_writes(src: &str, kind: DbKind, toks: &[Token]) -> Vec<Verdict> {
     let mut found = Vec::new();
     let mut i = 0;
@@ -629,8 +575,6 @@ fn nested_writes(src: &str, kind: DbKind, toks: &[Token]) -> Vec<Verdict> {
     found
 }
 
-/// `SELECT`, `VALUES` and `TABLE` read unless they store their result (`INTO`) or call a
-/// built-in with side effects anywhere in `all`.
 fn select(src: &str, all: &[Token], stmt: &[Token]) -> Option<Verdict> {
     let level = stmt[0].depth;
     if stmt.iter().any(|t| t.depth <= level && is(src, t, "INTO")) {
@@ -639,7 +583,6 @@ fn select(src: &str, all: &[Token], stmt: &[Token]) -> Option<Verdict> {
     calls(src, all, "SELECT")
 }
 
-/// The first call in `all` of a built-in with side effects, labelled after `verb`.
 fn calls(src: &str, all: &[Token], verb: &str) -> Option<Verdict> {
     all.windows(2).find_map(|pair| {
         let name = function_name(src, &pair[0])?;
@@ -650,8 +593,6 @@ fn calls(src: &str, all: &[Token], verb: &str) -> Option<Verdict> {
     })
 }
 
-/// `BEGIN` only starts a transaction, unless more than transaction modes follow it. MariaDB's
-/// `BEGIN NOT ATOMIC` opens a block whose first statement shares the piece: it is classified.
 fn begin(src: &str, kind: DbKind, stmt: &[Token]) -> Option<Verdict> {
     let rest = &stmt[1..];
     let transaction = rest.iter().all(|t| {
@@ -692,7 +633,6 @@ fn with(src: &str, all: &[Token], stmt: &[Token]) -> Option<Verdict> {
     }
 }
 
-/// `EXPLAIN` only plans, unless it is `EXPLAIN ANALYZE`, which runs the statement.
 fn explain(src: &str, kind: DbKind, stmt: &[Token]) -> Option<Verdict> {
     let level = stmt[0].depth;
     let mut analyze = false;
@@ -732,7 +672,6 @@ fn set(src: &str, stmt: &[Token]) -> Option<Verdict> {
         .then(|| Verdict::write("SET DEFAULT"))
 }
 
-/// A pragma writes when it is given a value, or when it is one that acts (`optimize`).
 fn pragma(src: &str, stmt: &[Token]) -> Option<Verdict> {
     let write = || Some(Verdict::write("PRAGMA"));
     if stmt.iter().any(|t| t.tok == Tok::Eq) {

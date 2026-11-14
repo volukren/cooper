@@ -532,8 +532,6 @@ pub fn set_null(b: &mut Browser, index: usize, null: bool) {
     }
 }
 
-/// Saves the row being edited. On a connection tagged Production it opens the confirmation
-/// prompt instead.
 fn save_draft(s: &mut Workspace, tab: TabId) {
     let Some((b, dialog)) = s.browser_and_dialog(tab) else {
         return;
@@ -567,7 +565,6 @@ fn save_draft(s: &mut Workspace, tab: TabId) {
     send_update(b, update);
 }
 
-/// Saves `update` as it was confirmed, if the same edit is still waiting to be saved.
 pub(super) fn save_confirmed(b: &mut Browser, update: RowUpdate) {
     let current = b
         .table
@@ -1034,8 +1031,6 @@ fn error_view(b: &Browser, error: &str, t: &Theme) -> El {
         )
 }
 
-/// The record view's labels column: the widest name (with the changed mark) or definition in the
-/// fonts in use, up to `MAX_LABEL_WIDTH` digits.
 fn label_width(columns: &[ColumnInfo], defs: &[ColumnDef], t: &Theme) -> f32 {
     let digit = grid::mono_cell_width(t);
     let mark = ui::text_width("•", t.mono) + 4.0;

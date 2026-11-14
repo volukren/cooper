@@ -1,7 +1,3 @@
--- Sample "shop" database for the UI tests.
--- Tests rely on: eight customers ordered by id, with José García as 2,
--- Fatima Al-Sayed (AE) as 5 and Bob as 8; the tables customers, products,
--- orders and order_items; and the view v_order_totals.
 BEGIN;
 
 CREATE TABLE customers (

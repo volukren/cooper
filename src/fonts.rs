@@ -1,8 +1,3 @@
-//! The font families installed on this computer, for the font pickers in the settings.
-//!
-//! Scanning reads a few tables of every family's regular face, so it runs once, on a thread of
-//! its own, the first time the settings open.
-
 use std::sync::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -15,11 +10,9 @@ use rune::Waker;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Family {
     pub name: String,
-    /// Every glyph has the same advance, so the family suits code and tables.
     pub mono: bool,
 }
 
-/// The installed families that set text, sorted by name.
 #[derive(Debug, Default)]
 pub struct Installed {
     pub families: Vec<Family>,
@@ -28,7 +21,6 @@ pub struct Installed {
 static INSTALLED: OnceLock<Installed> = OnceLock::new();
 static SCANNING: AtomicBool = AtomicBool::new(false);
 
-/// The families, once a scan finished.
 pub fn installed() -> Option<&'static Installed> {
     if cfg!(test) {
         return Some(test_fonts());
@@ -36,7 +28,6 @@ pub fn installed() -> Option<&'static Installed> {
     INSTALLED.get()
 }
 
-/// Starts the scan unless it ran or is running; `done` wakes the app when it finishes.
 pub fn scan_in_background(done: Option<Waker>) {
     if cfg!(test) || INSTALLED.get().is_some() || SCANNING.swap(true, Ordering::SeqCst) {
         return;
@@ -50,13 +41,10 @@ pub fn scan_in_background(done: Option<Waker>) {
             }
         });
     if spawned.is_err() {
-        // The pickers keep offering the families the OS ships; a later opening tries again.
         SCANNING.store(false, Ordering::SeqCst);
     }
 }
 
-/// Every installed family that has Latin letters, which leaves out symbol and icon fonts and the
-/// OS's hidden families.
 pub fn scan() -> Installed {
     let mut collection = Collection::new(CollectionOptions {
         shared: false,
@@ -90,8 +78,6 @@ pub fn scan() -> Installed {
     Installed { families }
 }
 
-/// Families the OS keeps for itself: `.SF NS`, `.AppleSystemUIFont`, the glyphs of last resort,
-/// and macOS's `System Font`, which can't be asked for by that name.
 fn hidden(name: &str) -> bool {
     name.is_empty()
         || name.starts_with('.')
@@ -100,9 +86,6 @@ fn hidden(name: &str) -> bool {
             .any(|os| name.eq_ignore_ascii_case(os))
 }
 
-/// Whether `font` is monospaced, or None when it can't be read or doesn't set Latin text:
-/// symbol fonts (a Windows symbol cmap, or a pictorial PANOSE family, as Wingdings and Zapf
-/// Dingbats have) and fonts that map letters to the missing glyph (math and size variants).
 fn spacing(font: &FontInfo) -> Option<bool> {
     const SYMBOL_ENCODING: (PlatformId, u16) = (PlatformId::Windows, 0);
     const PANOSE_PICTORIAL: u8 = 5;
@@ -132,7 +115,6 @@ fn spacing(font: &FontInfo) -> Option<bool> {
     Some(fixed_pitch || same_widths)
 }
 
-/// A fixed list, so tests don't depend on the fonts of the machine they run on.
 fn test_fonts() -> &'static Installed {
     static FONTS: OnceLock<Installed> = OnceLock::new();
     FONTS.get_or_init(|| {

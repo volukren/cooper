@@ -173,7 +173,6 @@ impl Browser {
         self.server_info = (!server_info.trim().is_empty()).then_some(server_info);
     }
 
-    /// Sizes the data grid and the script result's columns again after the fonts changed.
     pub fn fonts_changed(&mut self) {
         self.table
             .cells

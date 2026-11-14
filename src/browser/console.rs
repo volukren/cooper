@@ -477,8 +477,6 @@ fn result_text_selected(tx: &Tx) -> bool {
 
 const ALREADY_RUNNING: &str = "A script is already running · Esc cancels it";
 
-/// Runs the script in the editor, or only its selection. On a connection tagged Production a
-/// script that may change data or schema opens the confirmation prompt instead.
 fn run_script(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
     let Some((b, dialog)) = s.browser_and_dialog(tab) else {
         return;
@@ -505,7 +503,6 @@ fn run_script(s: &mut Workspace, tab: TabId, tx: &mut Tx) {
     start_script(b, &sql, tx);
 }
 
-/// Runs `sql` exactly as it was confirmed, not what the editor holds now.
 pub(super) fn run_confirmed(b: &mut Browser, sql: String, tx: &mut Tx) {
     if b.console.run.is_some() {
         return hint(b, ALREADY_RUNNING);

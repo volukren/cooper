@@ -47,7 +47,6 @@ impl TestConfig {
         self.add_sample_db_tagged(name, name, None)
     }
 
-    /// Builds the `sample` database as `<name>.db` and adds it as a connection tagged `tag`.
     pub fn add_sample_db_tagged(&self, name: &str, sample: &str, tag: Option<Tag>) -> PathBuf {
         let data = self.dir.path().join("data");
         std::fs::create_dir_all(&data).expect("create temp data dir");
@@ -203,9 +202,6 @@ impl TestWorkspace {
         let clip = clipboard::memory();
         rt.use_clipboard(&clip);
         rt.frame(0.0);
-        // A layout survey: `COOPER_TEST_FONTS="Sans|Mono"` and `COOPER_TEST_SIZE=760x480` run
-        // every UI test in other fonts or another window size, and `COOPER_OVERFLOW_LOG=path`
-        // appends what `overflows` finds after each settle.
         if let Ok(fonts) = std::env::var("COOPER_TEST_FONTS")
             && let Some((sans, mono)) = fonts.split_once('|')
         {
@@ -259,8 +255,6 @@ impl TestWorkspace {
         }
     }
 
-    /// Elements drawn past their parent's box with nothing clipping them: what a wider font
-    /// pushes out of a row, a field or a dialog.
     pub fn overflows(&self) -> Vec<String> {
         const SLACK: f32 = 1.0;
         let all = self.rt.elements();
@@ -278,7 +272,6 @@ impl TestWorkspace {
                 continue;
             }
             if e.visible != e.rect {
-                // Text cut off by a box that clips it, short of a scroll view's edge.
                 let cut = e.rect[2] - e.visible[2];
                 if e.role == "text" && e.visible[2] > 0.0 && e.visible[3] > 0.0 && cut > SLACK {
                     found.push(format!(

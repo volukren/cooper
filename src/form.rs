@@ -18,6 +18,8 @@ use crate::{
     workspace::{self, Workspace, model::Original},
 };
 
+mod url;
+
 const KINDS: [DbKind; 3] = [DbKind::Postgres, DbKind::MySql, DbKind::Sqlite];
 const STORAGES: [PasswordStorage; 2] = [PasswordStorage::Keychain, PasswordStorage::Plain];
 const TAGS: [Option<Tag>; 5] = [
@@ -188,15 +190,12 @@ pub fn database_placeholder(kind: DbKind) -> &'static str {
 }
 
 const LABEL_WIDTH: f32 = 112.0;
-/// The dialog's title, footer and margins around the fields.
 const FORM_CHROME: f32 = 150.0;
-/// The widest the labels grow in a wide font before they wrap.
 const MAX_LABEL_WIDTH: f32 = 168.0;
-/// The space between a field's label and its control.
 const FIELD_GAP: f32 = 12.0;
-/// What a row has for its label, the gap and its control.
 const ROW_WIDTH: f32 = 468.0;
-const LABELS: [&str; 10] = [
+const LABELS: [&str; 11] = [
+    "URL",
     "Name",
     "Type",
     "Host",
@@ -209,8 +208,6 @@ const LABELS: [&str; 10] = [
     "Environment",
 ];
 
-/// The labels' column: as wide as the longest label in the current font, so a wide font
-/// doesn't push a label into its field. The controls get what's left.
 fn label_width(t: &Theme) -> f32 {
     LABELS
         .iter()
@@ -218,7 +215,9 @@ fn label_width(t: &Theme) -> f32 {
         .fold(LABEL_WIDTH, f32::max)
         .min(MAX_LABEL_WIDTH)
 }
-const FIELDS: [&str; 6] = ["name", "host", "port", "user", "password", "database"];
+const FIELDS: [&str; 7] = [
+    "url", "name", "host", "port", "user", "password", "database",
+];
 
 pub struct FormDialog {
     pub form: ConnectionForm,
@@ -230,6 +229,7 @@ pub struct ConnectionForm {
     pub kind: DbKind,
     pub storage: PasswordStorage,
     pub tag: Option<Tag>,
+    pub url: TextEdit,
     pub name: TextEdit,
     pub host: TextEdit,
     pub port: TextEdit,
@@ -241,7 +241,6 @@ pub struct ConnectionForm {
     pub tag_open: bool,
     pub error: Option<String>,
     pub last_field: Cell<Option<&'static str>>,
-    /// The fields scroll when a wide font or a short window doesn't fit them.
     pub scroll: ui::ScrollY,
 }
 
@@ -272,6 +271,7 @@ impl ConnectionForm {
             kind: values.kind,
             storage: values.storage,
             tag: values.tag,
+            url: TextEdit::new(""),
             name,
             host: TextEdit::new(values.host.clone()),
             port: TextEdit::new(values.port.clone()),
@@ -302,8 +302,36 @@ impl ConnectionForm {
     }
 
     pub fn build(&self, existing: &[Connection]) -> Result<(Connection, String), String> {
+        let url = self.url.text.trim();
+        if !url.is_empty()
+            && let Err(reason) = url::parse(url)
+        {
+            return Err(format!("Invalid connection URL: {reason}"));
+        }
         let original = self.original.as_ref().map(|c| c.name.as_str());
         validate(&self.values(), original, existing)
+    }
+
+    pub fn shows_url(&self) -> bool {
+        self.original.is_none()
+    }
+
+    pub fn apply_url(&mut self) {
+        let Ok(parsed) = url::parse(&self.url.text) else {
+            return;
+        };
+        self.set_kind(parsed.kind);
+        if !parsed.kind.is_file_based() {
+            let port = parsed
+                .port
+                .map_or_else(|| port_text(parsed.kind), |p| p.to_string());
+            replace_keeping_focus(&mut self.host, parsed.host);
+            replace_keeping_focus(&mut self.port, port);
+            replace_keeping_focus(&mut self.user, parsed.user);
+            replace_keeping_focus(&mut self.password, parsed.password);
+        }
+        replace_keeping_focus(&mut self.database, parsed.database);
+        self.error = None;
     }
 
     pub fn set_error(&mut self, message: String) {
@@ -344,6 +372,7 @@ impl ConnectionForm {
 
     pub fn field(&self, field: &str) -> &TextEdit {
         match field {
+            "url" => &self.url,
             "name" => &self.name,
             "host" => &self.host,
             "port" => &self.port,
@@ -356,6 +385,7 @@ impl ConnectionForm {
 
     pub fn field_mut(&mut self, field: &str) -> &mut TextEdit {
         match field {
+            "url" => &mut self.url,
             "name" => &mut self.name,
             "host" => &mut self.host,
             "port" => &mut self.port,
@@ -379,12 +409,18 @@ impl ConnectionForm {
 
     #[cfg(test)]
     pub fn test_set_text(&mut self, field: &str, text: &str) {
-        let edit = self.field_mut(field);
-        let focused = edit.focused;
-        edit.replace_text(text.to_string());
-        edit.set_caret(edit.text.len());
-        edit.focused = focused;
+        replace_keeping_focus(self.field_mut(field), text.to_string());
     }
+}
+
+fn replace_keeping_focus(edit: &mut TextEdit, text: String) {
+    if edit.text == text {
+        return;
+    }
+    let focused = edit.focused;
+    edit.replace_text(text);
+    edit.set_caret(edit.text.len());
+    edit.focused = focused;
 }
 
 pub fn kind_labels() -> [&'static str; 3] {
@@ -439,6 +475,13 @@ fn press_save(s: &mut Workspace, _tx: &mut Tx) {
 
 fn clear_error(s: &mut Workspace, _tx: &mut Tx) {
     with_form(s, |f| f.error = None);
+}
+
+fn url_change(s: &mut Workspace, _tx: &mut Tx) {
+    with_form(s, |f| {
+        f.error = None;
+        f.apply_url();
+    });
 }
 
 fn submit(s: &mut Workspace, _tx: &mut Tx) {
@@ -498,10 +541,10 @@ fn input(
         .width(None)
         .on_edit(move |s: &mut Workspace| form_edit(s, pick))
         .on_submit(submit)
-        .on_change(if key == "form-port" {
-            port_change
-        } else {
-            clear_error
+        .on_change(match key {
+            "form-port" => port_change,
+            "form-url" => url_change,
+            _ => clear_error,
         })
 }
 
@@ -639,7 +682,21 @@ pub fn dialog(
         .w_full()
         .px(16.0)
         .pb(4.0)
-        .gap(10.0)
+        .gap(10.0);
+    if form.shows_url() {
+        let url = input(
+            &form.url,
+            "form-url",
+            url::placeholder(form.kind),
+            "URL",
+            |f| &mut f.url,
+        )
+        .on_key(field_key)
+        .build(&t.k)
+        .key("form-url");
+        body = body.child(field_row("URL", url, t));
+    }
+    body = body
         .child(field_row("Name", name, t))
         .child(field_row("Type", kind, t));
 
@@ -690,7 +747,6 @@ pub fn dialog(
         .on_key(field_key)
         .build(&t.k)
         .key("form-password");
-        // The choices wrap onto a second line when a wide font doesn't fit them side by side.
         let storage = row()
             .key("form-storage")
             .role("radiogroup")
@@ -805,8 +861,6 @@ pub fn dialog(
                 .build(&t.k)
                 .key("save-connection"),
         );
-    // A fit dialog doesn't scroll, so the fields do once they're taller than the window has
-    // room for beside the title, the footer and the margins.
     let room = cx
         .layout_size("workspace")
         .map_or(f32::INFINITY, |[_, height]| {

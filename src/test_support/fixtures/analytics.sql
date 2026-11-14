@@ -1,6 +1,3 @@
--- Sample "analytics" database for the UI tests.
--- Tests rely on: exactly 10 users (a table that fits on one page) and
--- exactly 3000 events (30 pages of 100 rows).
 BEGIN;
 
 CREATE TABLE users (

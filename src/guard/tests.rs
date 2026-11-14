@@ -16,7 +16,6 @@ fn verbs(sql: &str, kind: DbKind) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// `"X"` is one statement with verb X; `"X!"` is one that is also unbounded.
 fn expected(labels: &[&str]) -> Vec<(String, bool)> {
     labels
         .iter()

@@ -13,7 +13,6 @@ use crate::{
 
 pub const CUT_NOTE: &str = "… the value is longer, only its first 64 KB are loaded";
 const TAB_WIDTH: usize = 4;
-/// The labels' column stops growing at this many digits of its font.
 const MAX_LABEL_CHARS: usize = 30;
 const LABEL_PADDING: f32 = 24.;
 pub const LINE_HEIGHT: f32 = 20.;
@@ -76,7 +75,6 @@ pub fn record_text(text: &str) -> String {
     out
 }
 
-/// The labels' column: the widest name or type in the fonts in use, up to a cap.
 pub fn label_width(fields: &[Field], t: &Theme) -> f32 {
     let digit = ui::text_width("0", t.text_sm).max(1.);
     let widest = fields

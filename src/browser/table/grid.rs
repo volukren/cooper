@@ -434,8 +434,6 @@ impl GridScroll {
 pub struct DataGrid {
     pub widths: Vec<f32>,
     pub natural: Vec<f32>,
-    /// What each column's content needs, in digits of the mono font: the widths follow a font
-    /// change from these.
     cells: Vec<usize>,
     gutter_cells: usize,
     pub gutter: f32,
@@ -682,8 +680,6 @@ impl DataGrid {
         }
     }
 
-    /// Sizes the columns for a mono font whose digits are `cell_width` wide: a column left at
-    /// its natural width follows its content, one the user dragged keeps its size in digits.
     pub fn refit(&mut self, cell_width: f32) {
         if cell_width <= 0.0 || cell_width == self.cell_width || self.cells.is_empty() {
             return;

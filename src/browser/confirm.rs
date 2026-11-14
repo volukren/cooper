@@ -1,5 +1,3 @@
-//! The prompt that asks before a script or a row edit changes a connection tagged Production.
-
 #[cfg(test)]
 mod ui_tests;
 
@@ -19,17 +17,11 @@ use crate::{
 
 pub const MAX_LISTED: usize = 5;
 
-/// The lines a listed statement may take before it is cut, so its `WHERE` stays in view.
 const STATEMENT_LINES: usize = 3;
 
-/// Exactly what is sent when the prompt is confirmed.
 pub enum Pending {
     Script(String),
-    /// A row edit, with the row's label (`row 2`) to name it by.
-    Row {
-        update: RowUpdate,
-        row: String,
-    },
+    Row { update: RowUpdate, row: String },
 }
 
 pub struct Confirm {

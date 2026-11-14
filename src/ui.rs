@@ -86,8 +86,6 @@ pub fn icon_el(glyph: &'static Icon, size: f32, color: Color) -> El {
     icon(glyph, size).color(color)
 }
 
-/// How wide `content` is on one line in `style`, in the fonts in use: for columns sized to their
-/// labels, which a guess per character gets wrong once the font changes.
 pub fn text_width(content: &str, style: TextStyle) -> f32 {
     if content.is_empty() {
         return 0.0;

@@ -55,7 +55,6 @@ impl ThemeMode {
     }
 }
 
-/// The families behind the sans and mono slots, as CSS family lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fonts {
     pub interface: String,
@@ -86,8 +85,6 @@ impl Fonts {
         }
     }
 
-    /// The families as `AppSpec::families` takes them. Only a family that differs from the
-    /// default is leaked, once at launch.
     pub fn leak(&self) -> (&'static str, &'static str) {
         let leak = |family: &str, default: &'static str| -> &'static str {
             if family == default {
@@ -133,7 +130,6 @@ impl FontSlot {
         }
     }
 
-    /// Families that come with the OS, offered besides the default and whatever is typed.
     fn presets(self) -> &'static [&'static str] {
         match self {
             FontSlot::Interface if cfg!(target_os = "macos") => {
@@ -251,7 +247,6 @@ impl SettingsFile {
         Ok(loaded)
     }
 
-    /// The fonts the settings name, for the first frame; problems are reported by `load`.
     pub fn fonts(&self) -> Fonts {
         self.load(&mut Keymap::default())
             .map(|loaded| loaded.fonts)
@@ -279,8 +274,6 @@ impl SettingsFile {
     }
 }
 
-/// Writes the fonts that differ from the defaults into `[fonts]`, editing the table in place
-/// so its comments stay, and drops the table once nothing in it is left.
 fn save_fonts(doc: &mut DocumentMut, fonts: &Fonts) {
     if !doc.get(FONTS_KEY).is_some_and(Item::is_table_like) {
         doc.remove(FONTS_KEY);
@@ -308,8 +301,6 @@ fn save_fonts(doc: &mut DocumentMut, fonts: &Fonts) {
         match table.get_mut(slot.id()) {
             Some(item) if item.as_str() == Some(family) => {}
             Some(item) => {
-                // Assigning to the entry keeps the key's comments; the value's trailing one is
-                // carried over by hand.
                 let decor = item.as_value().map(|old| old.decor().clone());
                 *item = value(family);
                 if let (Some(decor), Some(new)) = (decor, item.as_value_mut()) {
@@ -416,9 +407,6 @@ fn set_font(s: &mut Workspace, slot: FontSlot, family: &str, tx: &mut Tx) {
     s.set_fonts(fonts, tx);
 }
 
-/// The default, the current family, the installed ones (the OS's own until the scan is done)
-/// and what's typed into the search, so any family can be chosen by name. A closed picker only
-/// needs the label of the current one.
 fn font_options(
     slot: FontSlot,
     current: &str,
@@ -446,7 +434,6 @@ fn font_options(
     }
     match installed.filter(|installed| !installed.families.is_empty()) {
         Some(installed) => {
-            // Code wants monospaced families, so they come first and the rest are marked.
             let (first, rest): (Vec<&Family>, Vec<&Family>) = match slot {
                 FontSlot::Code => installed.families.iter().partition(|family| family.mono),
                 FontSlot::Interface => (installed.families.iter().collect(), Vec::new()),
@@ -486,7 +473,6 @@ fn font_options(
     options
 }
 
-/// The id of the row that stands in for the installed fonts while they're scanned.
 const LOADING_FONTS: &str = "(loading installed fonts)";
 
 fn font_picker_el(
@@ -916,7 +902,6 @@ pub fn dialog(
     let height = cx
         .layout_size("workspace")
         .map_or(480.0, |size| (size[1] - 240.0).clamp(200.0, 480.0));
-    // The pickers' popovers go above the modal, which `Modal::build` pushes first.
     let mut popups = Vec::new();
     let page = match settings.page {
         Page::General => general_page(s, settings, t, &mut popups),

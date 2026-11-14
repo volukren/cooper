@@ -87,9 +87,7 @@ pub struct Workspace {
     pub toasts: Vec<Toast>,
     pub theme_mode: ThemeMode,
     pub fonts: Fonts,
-    /// The families installed on this computer, once they were scanned.
     pub installed_fonts: Option<&'static fonts::Installed>,
-    /// The fonts the grids' columns were last sized in (`rune::text::font_epoch`).
     font_epoch: u64,
     pub system_dark: Cell<bool>,
     pub window_title: String,
@@ -177,7 +175,6 @@ impl Workspace {
         }
     }
 
-    /// Puts `fonts` behind the sans and mono slots of every window and remembers them.
     pub fn set_fonts(&mut self, fonts: Fonts, tx: &mut Tx) {
         if self.fonts != fonts {
             tx.set_font_families(fonts.interface.clone(), fonts.code.clone());

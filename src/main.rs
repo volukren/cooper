@@ -104,7 +104,6 @@ fn menu_items() -> Vec<MenuItem<Workspace>> {
 }
 
 pub fn app(store: Store) -> App<Workspace> {
-    // The first frame is drawn in the chosen fonts; the workspace reports any problem with them.
     let fonts = SettingsFile::at(store.settings_path()).fonts();
     let app = App::new(spec(fonts.leak()));
     let handle = app.handle();

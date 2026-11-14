@@ -1,5 +1,3 @@
--- Sample "library" database for the UI tests.
--- Tests use it as a second connection and do not depend on its rows.
 BEGIN;
 
 CREATE TABLE authors (

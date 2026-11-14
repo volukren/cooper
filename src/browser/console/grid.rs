@@ -99,9 +99,7 @@ pub enum Selection {
 #[derive(Debug, Default)]
 pub struct Grid {
     pub widths: Vec<f32>,
-    /// The widths that fit each column's content, which `refit` tells from dragged ones.
     natural: Vec<f32>,
-    /// How wide a digit of the mono font was when the widths were fitted.
     digit: f32,
     pub gutter: f32,
     pub typed: bool,
@@ -198,8 +196,6 @@ impl Grid {
         }
     }
 
-    /// Sizes the columns again in the fonts in use: a column at its fitted width follows its
-    /// content, one the user dragged keeps its size in digits.
     pub fn refit(&mut self, result: &ScriptResult) {
         let fresh = Grid::new(result);
         if fresh.widths.len() != self.widths.len() {
@@ -227,7 +223,6 @@ impl Grid {
         self.gutter = fresh.gutter;
     }
 
-    /// Puts column `index` back at the width that fits its content.
     pub fn fit(&mut self, index: usize, width: f32) {
         if let Some(slot) = self.widths.get_mut(index) {
             *slot = width;
